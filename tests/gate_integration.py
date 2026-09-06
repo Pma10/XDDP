@@ -59,12 +59,22 @@ async def metrics(address):
             for line in data.splitlines() if line.startswith("xddp_gate_")}
 
 
-async def run(binary):
+async def run(binary,proxy_v2=False):
     counts = dict(login=0,status=0)
+    expected_ports=[]
+    observed_ports=[]
     backend_clients = set()
     async def backend(reader,writer):
         backend_clients.add(writer)
         try:
+            forwarded_port=None
+            if proxy_v2:
+                prefix=await reader.readexactly(16)
+                assert prefix[:12]==b"\r\n\r\n\0\r\nQUIT\n"
+                assert prefix[12:]==b"\x21\x11\x00\x0c"
+                addresses=await reader.readexactly(12)
+                assert addresses[:4]==bytes([127,0,0,1])
+                forwarded_port=int.from_bytes(addresses[8:10],"big")
             h = await readframe(reader)
             initial = await readframe(reader)
             if h[-1] == 1:
@@ -74,6 +84,8 @@ async def run(binary):
             else:
                 assert initial == b"\0\x06Player"
                 counts["login"] += 1
+                if proxy_v2:
+                    observed_ports.append(forwarded_port)
                 writer.write(b"admitted"); await writer.drain()
                 while data := await reader.read(8192):
                     writer.write(data); await writer.drain()
@@ -87,6 +99,7 @@ async def run(binary):
     public,metric = port(),port()
     cfg = json.loads((ROOT/"config/gate.json").read_text())
     cfg.update(listen=f"127.0.0.1:{public}",backend=f"127.0.0.1:{backend_port}",metrics=f"127.0.0.1:{metric}",runtime_file="")
+    cfg.update(proxy_v2=proxy_v2,allow_backend_identity_loss=not proxy_v2)
     cfg["limits"].update(total_sockets=64,prelogin=8,admitted=16,backend=17,ip_entries=128,prefix_entries=128)
     cfg["timeouts"].update(first_progress_ms=200,progress_ms=200,handshake_ms=1500,login_ms=500,status_ms=500,shutdown_seconds=1)
     cfg["cache"]["ttl_seconds"] = 300
@@ -114,6 +127,7 @@ async def run(binary):
                 # Coalesced handshake/Login Start/game bytes must arrive exactly once.
                 for split,host in ((False,b"localhost\0FML3\0"),(True,b"a"*130)):
                     r,w = await asyncio.open_connection("127.0.0.1",public)
+                    expected_ports.append(w.get_extra_info("sockname")[1])
                     wire = handshake(host=host)+LOGIN+b"\xff\x00encrypted-gameplay\x03"
                     if split:
                         for byte in wire:
@@ -150,6 +164,8 @@ async def run(binary):
                         pass
                     w.close()
                 assert counts["login"] == logins
+                if proxy_v2:
+                    assert observed_ports==expected_ports
 
                 # Idle first byte and slow partial handshake have bounded lifetimes.
                 for initial in (b"",b"\x80",handshake()[:4]):
@@ -178,7 +194,7 @@ async def run(binary):
                 assert final["oversized_packet"] >= 1
                 assert final["slow_connection"] >= 3
                 assert counts["login"] == logins
-                print("PASS: split/coalesced admission, opaque relay, half-close, status cache/ping, malformed input, deadlines, capacity and reconnect cleanup")
+                print(f"PASS: proxy_v2={proxy_v2}, split/coalesced admission, opaque relay, half-close, status cache/ping, malformed input, deadlines, capacity and reconnect cleanup")
             finally:
                 process.terminate()
                 try:
@@ -194,5 +210,6 @@ async def run(binary):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary",required=True)
+    parser.add_argument("--proxy-v2",action="store_true")
     args = parser.parse_args()
-    asyncio.run(run(str(Path(args.binary).resolve())))
+    asyncio.run(run(str(Path(args.binary).resolve()),args.proxy_v2))

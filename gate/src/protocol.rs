@@ -143,7 +143,7 @@ pub fn login(data: &[u8], version: i32, cfg: &Protocol) -> Result<(), Error> {
         Some(schema) => schema.as_str(),
         None => match version {
             4..=758 => "legacy", 759 => "signed", 760 => "signed_uuid",
-            761..=763 => "optional_uuid", 764..=769 => "uuid", _ => return Err(Error::Unsupported),
+            761..=763 => "optional_uuid", 764..=775 => "uuid", _ => return Err(Error::Unsupported),
         },
     };
     if schema == "signed" || schema == "signed_uuid" {
@@ -193,12 +193,15 @@ mod tests {
         let (_, off) = varint(&wire).unwrap().unwrap();
         assert_eq!(handshake(&wire[off..], &cfg()).unwrap().state, 1);
         for (v, tail) in [(47, vec![]), (759, vec![0]), (760, vec![0,0]),
-                          (761, vec![0]), (764, vec![0;16])] {
+                          (761, vec![0]), (764, vec![0;16]), (770, vec![0;16]),
+                          (774, vec![0;16]), (775, vec![0;16])] {
             let mut b = vec![0,3,b'a',b'b',b'c']; b.extend(tail);
             assert!(login(&b, v, &cfg()).is_ok());
             b.push(0); assert!(login(&b, v, &cfg()).is_err());
         }
         assert_eq!(login(&[0,1,b'a'], 9999, &cfg()), Err(Error::Unsupported));
+        let mut custom=cfg(); custom.login_schemas.insert(9999,"legacy".into());
+        assert!(login(&[0,1,b'a'],9999,&custom).is_ok());
         assert!(status_request(&[0,0]).is_err());
         assert!(ping(&[1;8]).is_err());
     }

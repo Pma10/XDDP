@@ -15,7 +15,13 @@ jobs:
       - name: Tests
         run: make test
       - name: Gate integration
-        run: python3 tests/gate_integration.py --binary gate/target/release/xddp-gate
+        run: |
+          python3 tests/gate_integration.py --binary gate/target/release/xddp-gate
+          python3 tests/gate_integration.py --binary gate/target/release/xddp-gate --proxy-v2
+      - name: Script syntax
+        run: |
+          for file in scripts/*.sh scripts/ddosctl; do sh -n "$file"; done
+          python3 -m compileall -q controller scripts tests
       - name: State layout evidence
         run: gate/target/release/xddp-gate --state-sizes
       - uses: actions/upload-artifact@v4

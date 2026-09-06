@@ -82,14 +82,17 @@ Login Start built-in layouts:
 | 759 | Name, optional timestamp/key/signature |
 | 760 | Same plus optional UUID |
 | 761–763 | Name, optional UUID |
-| 764–769 | Name, required UUID |
+| 764–775 | Name, required UUID (verified through 26.1 layout) |
 
 These ranges select a structural layout; they are not proof that every integer
 is a released version. Newer/snapshot/custom versions require a `login_schemas`
 mapping to `legacy`, `signed`, `signed_uuid`, `optional_uuid` or `uuid` after
 checking the actual wire layout. No unchecked trailing-byte escape hatch exists.
-Status permits protocol -1 discovery. Legacy pre-Netty `0xFE` status ping is not
-implemented. A compatibility audit must include the real client/proxy/mod mix.
+Status permits protocol -1 discovery. Legacy pre-Netty `0xFE` status ping and
+the separate transfer handshake nextState=3 are not implemented. A compatibility
+audit must include the real client/proxy/mod mix. Protocol 776 and later requires
+an explicit verified schema mapping; version metadata alone does not prove a
+Login Start wire layout.
 
 The gate validates public-key blob lengths, not signatures or player identity.
 Backend online-mode/Velocity handles authentication and subsequent state.

@@ -61,7 +61,7 @@ async fn run(cfg:Config) -> Result<(),Box<dyn std::error::Error>> {
             maintenance.metrics.set(34,p.mode as u64); maintenance.metrics.set(35,u64::from(p.observe));
             tokio::time::sleep(Duration::from_millis(100)).await; }
     });
-    eprintln!("xddp-gate ready on {}; observation={}",s.cfg.listen,s.cfg.observe);
+    eprintln!("xddp-gate ready on {}; observation={}",s.cfg.listen,s.runtime.policy(s.cfg.listen.ip()).0.observe);
     let mut tasks = JoinSet::new();
     let shutdown = shutdown_signal(); tokio::pin!(shutdown);
     loop {

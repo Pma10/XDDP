@@ -86,6 +86,9 @@ Login Start schema distinctions were checked against the protocol library's
 published data: [1.19](https://github.com/PrismarineJS/minecraft-data/blob/master/data/pc/1.19/protocol.json),
 [1.19.2](https://github.com/PrismarineJS/minecraft-data/blob/master/data/pc/1.19.2/protocol.json)
 and [1.20.2](https://github.com/PrismarineJS/minecraft-data/blob/master/data/pc/1.20.2/protocol.json).
+The required-UUID layout was also checked against
+[1.21.11](https://github.com/PrismarineJS/minecraft-data/blob/master/data/pc/1.21.11/protocol.json)
+and [26.1](https://github.com/PrismarineJS/minecraft-data/blob/master/data/pc/26.1/protocol.json).
 These are moving upstream references; the gate's finite schema ranges are explicit
 and do not automatically accept future versions.
 

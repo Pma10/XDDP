@@ -6,6 +6,10 @@ by the repository's GitHub Actions using the user's local Git authentication.
 
 ## Recorded runs
 
+- [Complete passing build and network run](https://github.com/Pma10/XDDP/actions/runs/34028056432)
+  for commit `6001650`: both Debian and kernel jobs passed, including eight XDP
+  test cases, twelve Rust tests, nine Python controller tests, ASan/UBSan parser
+  sweep, gate integration and native netns attach/replacement/detach with MTU 1400.
 - [Initial Debian build and tests](https://github.com/Pma10/XDDP/actions/runs/34026874890):
   Debian 12/libbpf 1.1 compiled the XDP objects, loader and release Rust gate.
   Rust/Python/native ASan+UBSan tests and gate integration passed. The separate
