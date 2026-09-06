@@ -68,6 +68,7 @@ class Controller:
         if not (pin / "program").exists():
             pin.mkdir(parents=True, exist_ok=True)
             self.loader("load", self.cfg["object"], pin)
+        self.loader("validate",pin)
         # Static policy reconciliation is fail-open and single-writer.
         self.lease(0)
         for name in ("ports", "owned", "allow", "block"):
@@ -145,6 +146,7 @@ class Controller:
             expected = int(args[2]) if len(args) == 3 else 0
             if expected < 0:
                 raise ValueError("invalid expected id")
+            self.loader("validate",self.cfg["pin_dir"])
             self.loader("attach",self.cfg["interface"],self.cfg["pin_dir"],self.cfg["xdp_mode"],"confirmed",expected)
             return self.command(["xdp","status"])
         if len(args) == 3 and args[:2] == ["xdp","detach"]:
@@ -169,8 +171,8 @@ class Controller:
         validate(c)
         old = self.cfg
         # Persist only after map updates succeed; a failure leaves the lease expired.
-        self.lease(0)
         try:
+            self.lease(0)
             for key,mapname,reason in (("allow_prefixes","allow",1),("block_prefixes","block",11)):
                 for n in set(old[key])-set(c[key]):
                     self.loader("prefix",old["pin_dir"],mapname,"del",n,reason)
@@ -179,14 +181,25 @@ class Controller:
                 for n in set(c[key])-set(old[key]):
                     self.loader("prefix",old["pin_dir"],mapname,"add",n,reason)
             atomic(self.path,json.dumps(c,indent=2)+"\n",0o640)
+            self.cfg = c
+            self.mode = self.adaptive.mode if c["manual_mode"] == "auto" else MODES.index(c["manual_mode"])
+            self.publish()
+            self.lease()
         except Exception:
             self.stopping = True
             raise
-        self.cfg = c
-        self.mode = self.adaptive.mode if c["manual_mode"] == "auto" else MODES.index(c["manual_mode"])
-        self.publish()
-        self.lease()
         return self.command(["status"])
+
+    def cleanup(self):
+        # Try each cleanup independently: a full/read-only runtime filesystem
+        # must not prevent expiring the kernel lease or removing the socket.
+        try:
+            self.publish(expired=True)
+        finally:
+            try:
+                self.lease(0)
+            finally:
+                Path(self.cfg["socket"]).unlink(missing_ok=True)
 
     def run(self):
         lock_path = Path(self.cfg["socket"]).with_suffix(".lock")
@@ -231,9 +244,7 @@ class Controller:
                             except OSError:
                                 pass
                 finally:
-                    self.publish(expired=True)
-                    self.lease(0)
-                    path.unlink(missing_ok=True)
+                    self.cleanup()
 
 
 def main():

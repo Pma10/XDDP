@@ -12,12 +12,19 @@ pub struct Policy { pub mode: usize, pub observe: bool, pub exempt: bool }
 struct Bucket { tokens: f64, last: Instant, rate: Rate }
 impl Bucket {
     fn new(rate: Rate, now: Instant) -> Self { Self { tokens: rate.burst, last: now, rate } }
-    fn take(&mut self, now: Instant, factor: f64) -> bool {
+    fn available(&mut self, now: Instant, factor: f64) -> bool {
         if self.rate.per_second == 0.0 { return true; }
         let cap = (self.rate.burst * factor).max(1.0);
         self.tokens = (self.tokens + now.saturating_duration_since(self.last).as_secs_f64() * self.rate.per_second * factor).min(cap);
-        self.last = now;
-        if self.tokens < 1.0 { false } else { self.tokens -= 1.0; true }
+        self.last = self.last.max(now);
+        self.tokens >= 1.0
+    }
+    fn consume(&mut self) {
+        if self.rate.per_second > 0.0 { self.tokens -= 1.0; }
+    }
+    fn take(&mut self, now: Instant, factor: f64) -> bool {
+        if !self.available(now, factor) { return false; }
+        self.consume(); true
     }
 }
 struct Entry {
@@ -107,23 +114,38 @@ impl Limiter {
             self.metrics.inc(20); return None;
         }
         let factor = self.cfg.mode_multipliers[p.mode];
-        let ip_ok = i.buckets[0].take(now, factor) && now >= i.penalty_until;
-        let prefix_ok = net.buckets[0].take(now, factor) && now >= net.penalty_until;
+        let ip_ok = i.buckets[0].available(now, factor) && now >= i.penalty_until;
+        let prefix_ok = net.buckets[0].available(now, factor) && now >= net.penalty_until;
         if !self.judged(ip_ok, 14, p) || !self.judged(prefix_ok, 15, p) { return None; }
+        if !p.exempt {
+            if ip_ok { i.buckets[0].consume(); }
+            if prefix_ok { net.buckets[0].consume(); }
+        }
         i.active += 1; net.active += 1;
         Some(Ticket { limiter: self.clone(), ip, prefix, started: now, handshake: false, admitted: false, status_complete: false })
     }
     pub fn event(&self, t: &Ticket, event: Event, p: Policy) -> bool {
-        // Consume the global budget first; admission-phase operations are bounded.
-        if !self.global(event, p) { return false; }
         let now = Instant::now(); let factor = self.cfg.mode_multipliers[p.mode];
-        for (table, key, reason) in [(&self.ip,t.ip,14), (&self.prefix,t.prefix,15)] {
-            let mut shard = table.shards[table.shard(key)].lock().unwrap();
-            let Some(e) = shard.get_mut(&key) else { return false; };
-            e.touched = now;
-            let ok = e.buckets[event as usize].take(now, factor) && now >= e.penalty_until;
-            if !self.judged(ok, reason, p) { return false; }
+        // Stable lock order: IP -> prefix -> global. No await or relay I/O here.
+        // Commit tokens only after every scope accepts, so a rejected identity
+        // cannot drain its CGNAT prefix or other clients' global login budget.
+        let mut ips = self.ip.shards[self.ip.shard(t.ip)].lock().unwrap();
+        let mut prefixes = self.prefix.shards[self.prefix.shard(t.prefix)].lock().unwrap();
+        let (Some(ip), Some(prefix)) = (ips.get_mut(&t.ip), prefixes.get_mut(&t.prefix)) else { return false; };
+        ip.touched = now; prefix.touched = now;
+        let index = event as usize;
+        let ip_ok = ip.buckets[index].available(now, factor) && now >= ip.penalty_until;
+        if !self.judged(ip_ok, 14, p) { return false; }
+        let prefix_ok = prefix.buckets[index].available(now, factor) && now >= prefix.penalty_until;
+        if !self.judged(prefix_ok, 15, p) { return false; }
+        let mut global = self.global.lock().unwrap();
+        let global_ok = global[index].available(now, factor);
+        if !self.judged(global_ok, 16, Policy { exempt:false, ..p }) { return false; }
+        if !p.exempt {
+            if ip_ok { ip.buckets[index].consume(); }
+            if prefix_ok { prefix.buckets[index].consume(); }
         }
+        if global_ok { global[index].consume(); }
         true
     }
     pub fn sweep(&self, shard: usize) {
@@ -149,6 +171,7 @@ mod tests {
         assert!(!b.take(now, 1.0));
         assert!(b.take(now + Duration::from_millis(500), 1.0));
         assert!(!b.take(now, 1.0));
+        assert!(!b.take(now + Duration::from_millis(500), 1.0));
     }
     #[test] fn prefix_and_mapped_identity() {
         assert_eq!(normalize("::ffff:192.0.2.4".parse().unwrap()), "192.0.2.4".parse::<IpAddr>().unwrap());
@@ -196,5 +219,53 @@ mod tests {
         t.handshake=true; t.status_complete=true; drop(t); assert_eq!(m.get(22),0);
         let mut t=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
         t.handshake=true; t.admitted=true; drop(t); assert_eq!(m.get(22),1);
+    }
+    #[test] fn rejected_ip_cannot_spend_shared_login_tokens() {
+        let mut cfg=config();
+        cfg.ip.login=Rate {per_second:0.001,burst:1.0};
+        cfg.prefix.login=Rate {per_second:0.001,burst:2.0};
+        cfg.global.login=Rate {per_second:0.001,burst:2.0};
+        let l=Limiter::new(cfg,Arc::new(Metrics::new()));
+        let p=Policy {mode:0,observe:false,exempt:false};
+        let a=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
+        let b=l.accept("192.0.2.2".parse().unwrap(),p).unwrap();
+        assert!(l.event(&a,Event::Login,p));
+        for _ in 0..20 { assert!(!l.event(&a,Event::Login,p)); }
+        assert!(l.event(&b,Event::Login,p));
+    }
+    #[test] fn rejected_prefix_preserves_ip_and_global_tokens() {
+        let mut cfg=config();
+        cfg.ip.login=Rate {per_second:0.001,burst:2.0};
+        cfg.prefix.login=Rate {per_second:0.001,burst:1.0};
+        cfg.global.login=Rate {per_second:0.001,burst:3.0};
+        let l=Limiter::new(cfg,Arc::new(Metrics::new()));
+        let p=Policy {mode:0,observe:false,exempt:false};
+        let a=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
+        assert!(l.event(&a,Event::Login,p));
+        assert!(!l.event(&a,Event::Login,p));
+        assert!(l.ip.shards[l.ip.shard(a.ip)].lock().unwrap()[&a.ip].buckets[3].tokens>=1.0);
+        assert!(l.global.lock().unwrap()[3].tokens>=2.0);
+    }
+    #[test] fn rejected_connect_preserves_cgnat_prefix_burst() {
+        let mut cfg=config();
+        cfg.ip.connect=Rate {per_second:0.001,burst:1.0};
+        cfg.prefix.connect=Rate {per_second:0.001,burst:2.0};
+        let l=Limiter::new(cfg,Arc::new(Metrics::new()));
+        let p=Policy {mode:0,observe:false,exempt:false};
+        let _a=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
+        for _ in 0..20 { assert!(l.accept("192.0.2.1".parse().unwrap(),p).is_none()); }
+        assert!(l.accept("192.0.2.2".parse().unwrap(),p).is_some());
+    }
+    #[test] fn exempt_identity_does_not_consume_prefix_budget_but_obeys_global() {
+        let mut cfg=config();
+        cfg.prefix.login=Rate {per_second:0.001,burst:1.0};
+        cfg.global.login=Rate {per_second:0.001,burst:2.0};
+        let l=Limiter::new(cfg,Arc::new(Metrics::new()));
+        let p=Policy {mode:0,observe:false,exempt:false};
+        let a=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
+        let b=l.accept("192.0.2.2".parse().unwrap(),p).unwrap();
+        assert!(l.event(&a,Event::Login,Policy {exempt:true,..p}));
+        assert!(l.event(&b,Event::Login,p));
+        assert!(!l.event(&a,Event::Login,Policy {exempt:true,..p}));
     }
 }

@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/"controller"))
@@ -19,6 +20,7 @@ class ControllerIOTests(unittest.TestCase):
         self.config_path=Path(self.tmp.name)/"controller.json"
         cfg["runtime_file"]=str(Path(self.tmp.name)/"runtime.json")
         cfg["metrics_file"]=str(Path(self.tmp.name)/"metrics.prom")
+        cfg["socket"]=str(Path(self.tmp.name)/"control.sock")
         self.config_path.write_text(json.dumps(cfg))
         self.controller=Controller(cfg,str(self.config_path)); self.calls=[]
         def loader(*args):
@@ -61,6 +63,52 @@ class ControllerIOTests(unittest.TestCase):
         self.assertEqual(self.config_path.read_text(),original)
         self.assertTrue(self.controller.stopping)
         self.assertEqual(self.calls[0][0],"config"); self.assertEqual(self.calls[0][2],0)
+
+    def test_publication_failure_stops_instead_of_resuming_next_tick(self):
+        with patch.object(self.controller,"publish",side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.controller.command(["mode","attack"])
+        self.assertTrue(self.controller.stopping)
+        self.assertEqual([c[2] for c in self.calls if c[0]=="config"],[0])
+
+    def test_expire_and_renew_failures_both_stop_controller(self):
+        for failed_call in (1,2):
+            self.controller.stopping=False
+            def lease_call(*args):
+                self.calls.append(args)
+                if args[0]=="config" and len(self.calls)==failed_call:
+                    raise subprocess.CalledProcessError(1,args)
+                return {}
+            self.calls.clear(); self.controller.loader=lease_call
+            with self.subTest(failed_call=failed_call),self.assertRaises(subprocess.CalledProcessError):
+                self.controller.command(["mode","attack"])
+            self.assertTrue(self.controller.stopping)
+
+    def test_cleanup_attempts_kernel_expiry_and_socket_unlink_despite_publish_error(self):
+        sock=Path(self.controller.cfg["socket"]); sock.touch()
+        with patch.object(self.controller,"publish",side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.controller.cleanup()
+        self.assertFalse(sock.exists())
+        self.assertEqual(self.calls[-1][0],"config"); self.assertEqual(self.calls[-1][2],0)
+
+    def test_attach_checks_complete_generation_before_network_mutation(self):
+        self.controller.command(["xdp","attach"])
+        self.assertEqual(self.calls[0],("validate",self.controller.cfg["pin_dir"]))
+        self.assertEqual(self.calls[1][0],"attach")
+
+    def test_invalid_generation_prevents_reconciliation_and_attach(self):
+        pin=Path(self.tmp.name)/"pins"; pin.mkdir(); (pin/"program").touch()
+        self.controller.cfg["pin_dir"]=str(pin)
+        def invalid(*args):
+            self.calls.append(args)
+            raise subprocess.CalledProcessError(2,args)
+        self.controller.loader=invalid
+        for action in (self.controller.prepare,lambda:self.controller.command(["xdp","attach"])):
+            self.calls.clear()
+            with self.assertRaises(subprocess.CalledProcessError): action()
+            self.assertEqual(len(self.calls),1)
+            self.assertEqual(self.calls[0][0],"validate")
 
 
 if __name__ == "__main__":

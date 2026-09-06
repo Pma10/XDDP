@@ -29,12 +29,73 @@ static uint64_t number(const char *s, uint64_t max) {
     require(*s && *s != '-' && !errno && !*end && n <= max, "invalid number");
     return n;
 }
+struct map_schema {
+    const char *name;
+    __u32 type, key_size, value_size, max_entries, flags;
+};
+static const struct map_schema schemas[] = {
+    {"configuration", BPF_MAP_TYPE_ARRAY, 4, sizeof(struct config), 1, 0},
+    {"counters", BPF_MAP_TYPE_PERCPU_ARRAY, 4, sizeof(struct stats), 1, 0},
+    {"syn_budget", BPF_MAP_TYPE_PERCPU_ARRAY, 4, sizeof(struct bucket), 1, 0},
+    {"ports", BPF_MAP_TYPE_ARRAY, 4, 4, 65536, 0},
+    {"owned", BPF_MAP_TYPE_LPM_TRIE, sizeof(struct prefix_key), 4, PREFIX_CAP, BPF_F_NO_PREALLOC},
+    {"allow", BPF_MAP_TYPE_LPM_TRIE, sizeof(struct prefix_key), 4, PREFIX_CAP, BPF_F_NO_PREALLOC},
+    {"block", BPF_MAP_TYPE_LPM_TRIE, sizeof(struct prefix_key), 4, PREFIX_CAP, BPF_F_NO_PREALLOC},
+};
+static void check_map(int fd, const char *name) {
+    struct bpf_map_info info = {};
+    __u32 len = sizeof(info);
+    if (bpf_obj_get_info_by_fd(fd, &info, &len)) die("map info");
+    for (size_t i = 0; i < sizeof(schemas)/sizeof(schemas[0]); i++) {
+        const struct map_schema *s = &schemas[i];
+        if (strcmp(name, s->name)) continue;
+        if (info.type != s->type || info.key_size != s->key_size ||
+            info.value_size != s->value_size || info.max_entries != s->max_entries ||
+            info.map_flags != s->flags) {
+            fprintf(stderr, "incompatible pinned map %s: type=%u key=%u value=%u entries=%u flags=%u; use a fresh generation\n",
+                    name, info.type, info.key_size, info.value_size, info.max_entries, info.map_flags);
+            exit(2);
+        }
+        return;
+    }
+    require(0, "unknown map schema");
+}
 static int pinned(const char *dir, const char *name) {
     char path[PATH_MAX];
     require(snprintf(path, sizeof(path), "%s/%s", dir, name) < (int)sizeof(path), "path too long");
     int fd = bpf_obj_get(path);
     if (fd < 0) die(path);
+    if (strcmp(name,"program")) check_map(fd,name);
+    else {
+        struct bpf_prog_info info = {};
+        __u32 len = sizeof(info);
+        if (bpf_obj_get_info_by_fd(fd,&info,&len)) die("program info");
+        require(info.type == BPF_PROG_TYPE_XDP,"pinned program is not XDP");
+    }
     return fd;
+}
+static void validate_generation(const char *dir) {
+    int fd = pinned(dir,"program");
+    __u32 ids[64] = {};
+    struct bpf_prog_info prog = {.nr_map_ids=64, .map_ids=(uintptr_t)ids};
+    __u32 len = sizeof(prog);
+    if (bpf_obj_get_info_by_fd(fd,&prog,&len)) die("program map IDs");
+    require(prog.nr_map_ids <= 64,"unexpected program map count");
+    for (size_t i = 0; i < sizeof(schemas)/sizeof(schemas[0]); i++) {
+        int map_fd = pinned(dir,schemas[i].name);
+        struct bpf_map_info map = {};
+        len = sizeof(map);
+        if (bpf_obj_get_info_by_fd(map_fd,&map,&len)) die("map ID");
+        int found = 0;
+        for (__u32 j = 0; j < prog.nr_map_ids; j++) if (ids[j] == map.id) found = 1;
+        if (!found) {
+            fprintf(stderr,"pinned map %s does not belong to this program; use a complete generation\n",schemas[i].name);
+            exit(2);
+        }
+        close(map_fd);
+    }
+    close(fd);
+    puts("{\"valid\":true}");
 }
 static __u32 flags(const char *s) {
     if (!strcmp(s, "driver")) return XDP_FLAGS_DRV_MODE;
@@ -183,6 +244,7 @@ static void test_run(const char *dir, const char *path) {
 int main(int argc, char **v) {
     require(argc >= 2, "load|attach|detach|config|port|prefix|stats|status");
     if (!strcmp(v[1], "load") && argc == 4) load(v[2], v[3]);
+    else if (!strcmp(v[1], "validate") && argc == 3) validate_generation(v[2]);
     else if (!strcmp(v[1], "attach")) attach(argc, v);
     else if (!strcmp(v[1], "detach") && argc == 5) detach(v);
     else if (!strcmp(v[1], "config") && argc == 11) {

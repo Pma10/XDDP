@@ -31,6 +31,10 @@ PASS test; the full program still requires its own verifier and integration test
 3. Keep `observe=true`, `manual_mode="normal"`, zero SYN budgets. Adjust paths
    only within the dedicated `/sys/fs/bpf/xddp/GENERATION` namespace. Existing
    maps must have the current ABI; use a fresh generation after ABI changes.
+   Startup and controller attachment validate every map's type, key/value size,
+   capacity and flags, and verify that each pin belongs to the pinned program.
+   `xddp-loader validate PIN_DIR` runs the same read-only check. Incompatible or
+   mixed generations fail before policy reconciliation or attachment.
 4. Install built files with `sudo sh scripts/install.sh`. The installer never
    starts services, attaches XDP, changes firewall policy or migrates Java.
 5. Start `xddp-controller`. It loads/verifies and pins maps/program, reconciles
@@ -43,6 +47,10 @@ PASS test; the full program still requires its own verifier and integration test
    Compare the same load against no-XDP and minimal XDP_PASS baselines.
 
 Controller SIGTERM sets an expired lease; SIGKILL is handled by lease expiry.
+Failed command persistence, publication or lease updates stop the controller
+instead of resuming policy renewal on its next tick. Shutdown attempts kernel
+lease expiry and socket removal even if publishing the expired gate state fails;
+an unreachable kernel or gate state still falls back through its lease timeout.
 To test crash fallback without systemd immediately restarting it, use a disposable
 service configuration with restart disabled. Confirm candidate-drop packets pass
 after expiry while existing TCP sessions remain up. Check both XDP and gate state.

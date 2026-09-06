@@ -9,6 +9,7 @@ import tempfile
 import time
 import unittest
 import uuid
+from contextlib import contextmanager
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -50,6 +51,48 @@ class XDPTests(unittest.TestCase):
 
     def configure(self,observe=0,lease=60,fragments=0,rate=0,burst=0):
         self.loader("config",self.pin,time.monotonic_ns()+int(lease*1e9),observe,0,1,fragments,rate,burst,1)
+
+    @contextmanager
+    def foreign_counters(self,value_size=168,map_type=6,key_size=4,entries=1):
+        # Deliberately replace only a private test pin; keep the original FD
+        # alive and restore it even when an assertion fails.
+        import ctypes
+        lib=ctypes.CDLL("libbpf.so.1",use_errno=True)
+        lib.bpf_obj_get.argtypes=[ctypes.c_char_p]; lib.bpf_obj_get.restype=ctypes.c_int
+        lib.bpf_obj_pin.argtypes=[ctypes.c_int,ctypes.c_char_p]; lib.bpf_obj_pin.restype=ctypes.c_int
+        lib.bpf_map_create.argtypes=[ctypes.c_int,ctypes.c_char_p,ctypes.c_uint,ctypes.c_uint,ctypes.c_uint,ctypes.c_void_p]
+        lib.bpf_map_create.restype=ctypes.c_int
+        path=self.pin/"counters"; encoded=os.fsencode(path)
+        original=lib.bpf_obj_get(encoded)
+        self.assertGreaterEqual(original,0)
+        foreign=-1
+        try:
+            path.unlink()
+            foreign=lib.bpf_map_create(map_type,b"foreign",key_size,value_size,entries,None)
+            self.assertGreaterEqual(foreign,0,f"map_create errno={ctypes.get_errno()}")
+            self.assertEqual(lib.bpf_obj_pin(foreign,encoded),0)
+            yield
+        finally:
+            path.unlink(missing_ok=True)
+            restored=lib.bpf_obj_pin(original,encoded)
+            os.close(original)
+            if foreign>=0: os.close(foreign)
+            self.assertEqual(restored,0,"could not restore test map pin")
+
+    def test_loader_rejects_wrong_map_geometry_before_buffer_access(self):
+        for kwargs in ({"value_size":256},{"map_type":2},{"map_type":1,"key_size":8},{"entries":2}):
+            with self.subTest(kwargs=kwargs),self.foreign_counters(**kwargs):
+                with self.assertRaises(subprocess.CalledProcessError) as failure:
+                    self.loader("stats",self.pin)
+                self.assertIn("incompatible pinned map counters",failure.exception.stderr)
+
+    def test_generation_validation_rejects_foreign_compatible_map(self):
+        self.assertTrue(json.loads(self.loader("validate",self.pin))["valid"])
+        with self.foreign_counters():
+            with self.assertRaises(subprocess.CalledProcessError) as failure:
+                self.loader("validate",self.pin)
+            self.assertIn("does not belong to this program",failure.exception.stderr)
+        self.assertTrue(json.loads(self.loader("validate",self.pin))["valid"])
 
     def run_packet(self,data):
         path = Path(self.tmp.name)/"packet.bin"; path.write_bytes(data)

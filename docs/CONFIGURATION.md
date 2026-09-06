@@ -66,6 +66,14 @@ a temporary penalty. All penalty thresholds start disabled. Neither a score
 nor any single behavior permanently blocks an IP or prefix. One IP is not one
 player. Set rates and bursts from measured large NAT joins and reconnects.
 
+Handshake/status/login tokens are charged only after IP, prefix and global policy
+accepts the event. An enforced source rejection cannot spend a shared prefix or
+global event budget. Source-exempt clients spend only the global event budget.
+Connect IP/prefix tokens likewise commit together; the separate global accept
+guard still counts incoming accepts before allocating identity state, including
+clients later rejected by source policy. Observation records candidates and
+charges available buckets without creating token debt.
+
 ## Minecraft compatibility
 
 Handshake accepts status nextState=1 and login nextState=2. Zero ports, invalid
