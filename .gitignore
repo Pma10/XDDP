@@ -1,0 +1,12 @@
+/build/
+/target/
+/gate/target/
+/.tools/
+/artifacts/
+__pycache__/
+*.pyc
+*.o
+*.log
+*.tmp
+/.venv/
+/docs/LOCAL_ENVIRONMENT.md
