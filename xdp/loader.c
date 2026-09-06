@@ -192,6 +192,14 @@ int main(int argc, char **v) {
         close(fd);
     } else if (!strcmp(v[1], "prefix") && argc == 7) prefix(v);
     else if (!strcmp(v[1], "clear") && argc == 4) clear_map(v[2],v[3]);
+    else if (!strcmp(v[1], "id") && argc == 3) {
+        int fd = pinned(v[2],"program");
+        struct bpf_prog_info info = {};
+        __u32 len = sizeof(info);
+        if (bpf_obj_get_info_by_fd(fd,&info,&len)) die("program info");
+        printf("{\"program_id\":%u}\n",info.id);
+        close(fd);
+    }
     else if (!strcmp(v[1], "stats") && argc == 3) stats(v[2]);
     else if (!strcmp(v[1], "status") && argc == 4) {
         __u32 id = 0;

@@ -1,0 +1,34 @@
+[Unit]
+Description=XDDP leased XDP controller (no automatic attachment)
+After=network.target
+RequiresMountsFor=/sys/fs/bpf
+
+[Service]
+Type=simple
+User=root
+Group=root
+RuntimeDirectory=xddp
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+ExecStartPre=/usr/local/libexec/xddp-preflight
+ExecStart=/usr/local/sbin/ddosctl --daemon
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+LimitMEMLOCK=infinity
+LimitNOFILE=4096
+UMask=0022
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_RESOURCE
+ReadWritePaths=/sys/fs/bpf/xddp /etc/xddp /run/xddp
+
+[Install]
+WantedBy=multi-user.target
