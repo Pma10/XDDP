@@ -6,6 +6,15 @@ by the repository's GitHub Actions using the user's local Git authentication.
 
 ## Recorded runs
 
+- [Final implementation validation](https://github.com/Pma10/XDDP/actions/runs/34028321516)
+  for commit `7db2ef0`: **PASS** in both jobs. Debian used libbpf 1.1.2 and
+  clang 14. Twelve Rust tests and nine Python controller tests passed; eight
+  BPF tests were intentionally skipped in the unprivileged Debian container and
+  then passed in the separate privileged kernel job. Both gate integration runs
+  (`proxy_v2=false` and `proxy_v2=true`) passed, including original client port
+  forwarding. Shell/Python syntax checks, C ASan/UBSan sweep, native veth attach,
+  MTU 1400 ICMP, expected-ID replacement, stale-ID rejection and detach passed.
+  Binary layout: identity key 17 bytes, value 224 bytes, connection ticket 64 bytes.
 - [Complete passing build and network run](https://github.com/Pma10/XDDP/actions/runs/34028056432)
   for commit `6001650`: both Debian and kernel jobs passed, including eight XDP
   test cases, twelve Rust tests, nine Python controller tests, ASan/UBSan parser
@@ -39,6 +48,8 @@ by the repository's GitHub Actions using the user's local Git authentication.
   half-close, cached status/ping without per-client backend polls, invalid lengths
   and state transitions, idle/partial timeout, prelogin capacity and reconnect
   cleanup.
+  The PROXY v2 run also validates the on-wire header and original client port;
+  it does not claim a real Velocity/Paper installation was exercised.
 - Isolated netns/veth: native driver attach, MTU 1400 ICMP, expected-ID atomic
   replacement, rejection of stale IDs and clean detach.
 
