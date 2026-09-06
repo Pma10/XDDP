@@ -49,11 +49,15 @@ fn subnet(ip: IpAddr, v4: u8, v6: u8) -> IpAddr {
         IpAddr::V6(v) => IpAddr::V6(Ipv6Addr::from(u128::from(v) & if v6 == 0 {0} else {u128::MAX << (128-v6)})),
     }
 }
-pub struct Ticket { limiter: Arc<Limiter>, ip: IpAddr, prefix: IpAddr, pub handshake: bool, pub admitted: bool }
+pub struct Ticket { limiter: Arc<Limiter>, ip: IpAddr, prefix: IpAddr, started: Instant,
+    pub handshake: bool, pub admitted: bool, pub status_complete: bool }
+pub fn state_sizes() -> (usize,usize,usize) {
+    (std::mem::size_of::<IpAddr>(),std::mem::size_of::<Entry>(),std::mem::size_of::<Ticket>())
+}
 impl Drop for Ticket {
     fn drop(&mut self) {
         let now = Instant::now();
-        let churn = !self.admitted;
+        let churn = !self.status_complete && (!self.admitted || self.started.elapsed() < Duration::from_secs(self.limiter.cfg.churn_window_seconds));
         if churn { self.limiter.metrics.inc(22); }
         if !self.handshake { self.limiter.metrics.inc(13); }
         for (table, key) in [(&self.limiter.ip, self.ip), (&self.limiter.prefix, self.prefix)] {
@@ -107,7 +111,7 @@ impl Limiter {
         let prefix_ok = net.buckets[0].take(now, factor) && now >= net.penalty_until;
         if !self.judged(ip_ok, 14, p) || !self.judged(prefix_ok, 15, p) { return None; }
         i.active += 1; net.active += 1;
-        Some(Ticket { limiter: self.clone(), ip, prefix, handshake: false, admitted: false })
+        Some(Ticket { limiter: self.clone(), ip, prefix, started: now, handshake: false, admitted: false, status_complete: false })
     }
     pub fn event(&self, t: &Ticket, event: Event, p: Policy) -> bool {
         // Consume the global budget first; admission-phase operations are bounded.
@@ -150,5 +154,47 @@ mod tests {
         assert_eq!(normalize("::ffff:192.0.2.4".parse().unwrap()), "192.0.2.4".parse::<IpAddr>().unwrap());
         assert_eq!(subnet("192.0.2.4".parse().unwrap(),24,64), "192.0.2.0".parse::<IpAddr>().unwrap());
         assert_eq!(subnet("2001:db8::1234".parse().unwrap(),24,64), "2001:db8::".parse::<IpAddr>().unwrap());
+    }
+    fn config() -> Limits {
+        let c: crate::config::Config = serde_json::from_str(include_str!("../../config/gate.json")).unwrap();
+        c.limits
+    }
+    #[test] fn concurrency_release_observation_and_prefix_bursts() {
+        let mut cfg = config(); cfg.connections_ip = 1; cfg.connections_prefix = 2;
+        cfg.ip.connect = Rate { per_second:1.0,burst:1.0 };
+        let metrics = Arc::new(Metrics::new()); let l = Limiter::new(cfg,metrics.clone());
+        let observe = Policy { mode:0,observe:true,exempt:false };
+        let ip = "192.0.2.1".parse().unwrap();
+        let first = l.accept(ip,observe).unwrap();
+        assert!(l.accept(ip,observe).is_none()); // Safety caps also apply in observation.
+        let second = l.accept("192.0.2.2".parse().unwrap(),observe).unwrap();
+        assert!(l.accept("192.0.2.3".parse().unwrap(),observe).is_none());
+        drop(first); drop(second);
+        let third = l.accept(ip,observe).unwrap(); // Rate candidate, allowed during observation.
+        assert!(metrics.get(27)>0); drop(third);
+        assert!(l.accept(ip,Policy {observe:false,..observe}).is_none());
+    }
+    #[test] fn rotating_sources_cannot_exceed_shard_capacity() {
+        let mut cfg = config(); cfg.ip_entries=64; cfg.prefix_entries=64;
+        let m = Arc::new(Metrics::new()); let l=Limiter::new(cfg,m.clone());
+        let p=Policy {mode:0,observe:true,exempt:false};
+        let first:IpAddr="192.0.2.1".parse().unwrap(); let shard=l.ip.shard(first);
+        let ticket=l.accept(first,p).unwrap();
+        let collision=(2..=254).map(|n|IpAddr::V4(Ipv4Addr::new(192,0,2,n)))
+            .find(|ip| l.ip.shard(*ip)==shard);
+        // Search a larger address space if the random hash happens to have no /24 collision.
+        let collision=collision.or_else(|| (0..65536u32).map(|n|IpAddr::V4(Ipv4Addr::from(0xc6330000+n)))
+            .find(|ip|l.ip.shard(*ip)==shard)).unwrap();
+        assert!(l.accept(collision,p).is_none()); assert_eq!(m.get(21),1);
+        l.sweep(shard); assert_eq!(l.ip.shards[shard].lock().unwrap().len(),1);
+        drop(ticket);
+    }
+    #[test] fn valid_status_does_not_accrue_churn_but_short_login_does() {
+        let m=Arc::new(Metrics::new()); let l=Limiter::new(config(),m.clone());
+        let p=Policy {mode:0,observe:true,exempt:false};
+        let mut t=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
+        t.handshake=true; t.status_complete=true; drop(t); assert_eq!(m.get(22),0);
+        let mut t=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
+        t.handshake=true; t.admitted=true; drop(t); assert_eq!(m.get(22),1);
     }
 }

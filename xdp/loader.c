@@ -167,6 +167,19 @@ static void stats(const char *dir) {
     puts("}}");
     free(all); close(fd);
 }
+static void test_run(const char *dir, const char *path) {
+    unsigned char data[131072];
+    FILE *file = fopen(path,"rb");
+    if (!file) die("packet file");
+    size_t n = fread(data,1,sizeof(data),file);
+    require(!ferror(file) && n < sizeof(data),"packet file too large or read failed");
+    fclose(file);
+    int fd = pinned(dir,"program");
+    LIBBPF_OPTS(bpf_test_run_opts, opts, .data_in=data, .data_size_in=n, .repeat=1);
+    if (bpf_prog_test_run_opts(fd,&opts)) die("BPF_PROG_TEST_RUN");
+    printf("{\"retval\":%u,\"duration_ns\":%u}\n",opts.retval,opts.duration);
+    close(fd);
+}
 int main(int argc, char **v) {
     require(argc >= 2, "load|attach|detach|config|port|prefix|stats|status");
     if (!strcmp(v[1], "load") && argc == 4) load(v[2], v[3]);
@@ -192,6 +205,7 @@ int main(int argc, char **v) {
         close(fd);
     } else if (!strcmp(v[1], "prefix") && argc == 7) prefix(v);
     else if (!strcmp(v[1], "clear") && argc == 4) clear_map(v[2],v[3]);
+    else if (!strcmp(v[1], "test") && argc == 4) test_run(v[2],v[3]);
     else if (!strcmp(v[1], "id") && argc == 3) {
         int fd = pinned(v[2],"program");
         struct bpf_prog_info info = {};

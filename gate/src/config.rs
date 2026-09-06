@@ -40,6 +40,7 @@ pub struct Limits {
     pub mode_multipliers: [f64; 4],
     pub churn_score_threshold: f64,
     pub churn_half_life_seconds: u64,
+    pub churn_window_seconds: u64,
     pub penalty_seconds: u64,
 }
 #[derive(Clone, Debug, Deserialize)]
@@ -126,7 +127,7 @@ impl Config {
             l.ip_entries < 64 || l.ip_entries > 1_000_000 || l.prefix_entries < 64 ||
             l.prefix_entries > 1_000_000 || l.ip_entries % 64 != 0 || l.prefix_entries % 64 != 0 ||
             l.ipv4_prefix > 32 || l.ipv6_prefix > 128 || l.idle_entry_seconds == 0 ||
-            l.churn_half_life_seconds == 0 || l.penalty_seconds > 3600 ||
+            l.churn_half_life_seconds == 0 || l.churn_window_seconds > 60 || l.penalty_seconds > 3600 ||
             !l.churn_score_threshold.is_finite() || l.churn_score_threshold < 0.0 {
             return Err("invalid resource/identity/penalty limits".into());
         }

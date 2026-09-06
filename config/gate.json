@@ -27,6 +27,7 @@
     "mode_multipliers": [1.0, 0.8, 0.5, 0.1],
     "churn_score_threshold": 0,
     "churn_half_life_seconds": 30,
+    "churn_window_seconds": 3,
     "penalty_seconds": 10
   },
   "timeouts": {"first_progress_ms": 3000, "progress_ms": 3000, "handshake_ms": 10000, "login_ms": 10000, "status_ms": 5000, "backend_ms": 3000, "shutdown_seconds": 60},

@@ -16,6 +16,8 @@ jobs:
         run: make test
       - name: Gate integration
         run: python3 tests/gate_integration.py --binary gate/target/release/xddp-gate
+      - name: State layout evidence
+        run: gate/target/release/xddp-gate --state-sizes
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -31,7 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install kernel test dependencies
-        run: sudo apt-get update && sudo apt-get install -y clang libbpf-dev libelf-dev zlib1g-dev linux-tools-common linux-tools-generic
+        run: sudo apt-get update && sudo apt-get install -y clang libbpf-dev libelf-dev zlib1g-dev
       - run: make xdp
       - name: Load and execute XDP fixtures
         run: |

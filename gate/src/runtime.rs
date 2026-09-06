@@ -46,3 +46,24 @@ impl Runtime {
         }
     }
 }
+
+#[cfg(test)] mod tests {
+    use super::*;
+    #[test] fn expired_and_unrenewed_lease_fail_to_observation() {
+        let r=Runtime::new(true); let ip="192.0.2.4".parse().unwrap();
+        assert!(r.policy(ip).0.observe);
+        let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        *r.value.write().unwrap()=Some(Snapshot {wire:Wire {generation:1,expires_unix:now+10,mode:3,observe:false,
+            allow:vec![],block:vec!["192.0.2.0/24".parse().unwrap()]},received:Instant::now()});
+        assert!(r.policy(ip).1); assert_eq!(r.policy(ip).0.mode,3);
+        r.value.write().unwrap().as_mut().unwrap().received=Instant::now()-Duration::from_secs(16);
+        let (p,blocked)=r.policy(ip); assert!(p.observe); assert_eq!(p.mode,0); assert!(!blocked);
+    }
+    #[test] fn allow_precedes_block() {
+        let r=Runtime::new(true); let ip="192.0.2.4".parse().unwrap();
+        let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        *r.value.write().unwrap()=Some(Snapshot {wire:Wire {generation:1,expires_unix:now+10,mode:2,observe:false,
+            allow:vec!["192.0.2.4/32".parse().unwrap()],block:vec!["192.0.2.0/24".parse().unwrap()]},received:Instant::now()});
+        let (p,blocked)=r.policy(ip); assert!(p.exempt); assert!(!blocked);
+    }
+}

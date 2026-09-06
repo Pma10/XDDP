@@ -26,6 +26,11 @@ impl Drop for Admission { fn drop(&mut self) { let _ = (&self.slot,&self.gauge,&
 
 fn main() -> Result<(),Box<dyn std::error::Error>> {
     let args:Vec<_> = std::env::args().collect();
+    if args.len() == 2 && args[1] == "--state-sizes" {
+        let (key,value,ticket) = limiter::state_sizes();
+        println!("{{\"identity_key_bytes\":{key},\"identity_value_bytes\":{value},\"connection_ticket_bytes\":{ticket}}}");
+        return Ok(());
+    }
     if args.len() < 2 || args.len() > 3 || (args.len() == 3 && args[2] != "--check") {
         return Err("usage: xddp-gate CONFIG.json [--check]".into());
     }
@@ -131,7 +136,7 @@ async fn handle(mut client:TcpStream,peer:SocketAddr,s:Arc<State>,mut ticket:Tic
         let response = s.cache.get(&s.metrics);
         timeout(Duration::from_millis(s.cfg.timeouts.status_ms),client.write_all(&response)).await.map_err(|_|Error::Deadline)?.map_err(|_|Error::Io)?;
         // A successful status-only client may close without a ping; do not score it as churn.
-        ticket.admitted = true;
+        ticket.status_complete = true;
         let ping = phase(&mut client,&s,&mut left,s.cfg.timeouts.status_ms,s.cfg.timeouts.progress_ms).await?;
         protocol::ping(&ping.body)?;
         timeout(Duration::from_millis(s.cfg.timeouts.status_ms),client.write_all(&ping.wire)).await.map_err(|_|Error::Deadline)?.map_err(|_|Error::Io)?;
@@ -144,6 +149,7 @@ async fn handle(mut client:TcpStream,peer:SocketAddr,s:Arc<State>,mut ticket:Tic
     let (Ok(admitted),Ok(backend_slot),Ok(backend_socket)) = (s.admitted.clone().try_acquire_owned(),
         s.backend.clone().try_acquire_owned(),s.sockets.clone().try_acquire_owned()) else { s.metrics.inc(20); return Ok(()); };
     let (_admitted,_backend_slot,_backend_socket) = (admitted,backend_slot,backend_socket);
+    let _backend_gauge = Gauge::new(s.metrics.clone(),3);
     s.metrics.inc(31);
     let backend = timeout(Duration::from_millis(s.cfg.timeouts.backend_ms),async {
         let mut backend = TcpStream::connect(s.cfg.backend).await?;
@@ -153,7 +159,7 @@ async fn handle(mut client:TcpStream,peer:SocketAddr,s:Arc<State>,mut ticket:Tic
         Ok::<_,std::io::Error>(backend)
     }).await;
     let mut backend = match backend { Ok(Ok(b))=>b, _=>{s.metrics.inc(17); return Ok(());} };
-    let (_backend_gauge,_admitted_gauge) = (Gauge::new(s.metrics.clone(),3),Gauge::new(s.metrics.clone(),30));
+    let _admitted_gauge = Gauge::new(s.metrics.clone(),30);
     ticket.admitted = true;
     // Keep identity concurrency accounting until relay ends; no hot-path limiter locks.
     drop(admission); drop(handshake); drop(login);

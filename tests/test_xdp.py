@@ -53,8 +53,10 @@ class XDPTests(unittest.TestCase):
 
     def run_packet(self,data):
         path = Path(self.tmp.name)/"packet.bin"; path.write_bytes(data)
-        raw = subprocess.run(["bpftool","-j","prog","run","pinned",str(self.pin/"program"),
-                              "data_in",str(path),"repeat","1"],check=True,capture_output=True,text=True).stdout
+        try:
+            raw = self.loader("test",self.pin,path)
+        except subprocess.CalledProcessError as e:
+            self.fail(f"BPF test run failed: {e.stderr}")
         return json.loads(raw)["retval"]
 
     def test_valid_small_gameplay_and_flags(self):
@@ -63,7 +65,8 @@ class XDPTests(unittest.TestCase):
                 self.assertEqual(self.run_packet(tcp(flags,bytes(n))),2)
 
     def test_malformed(self):
-        for n in (1,13,14,20,33,40,53):
+        # Kernel test-run requires >= Ethernet header; shorter fixtures run in ASan C tests.
+        for n in (14,20,33,40,53):
             self.assertEqual(self.run_packet(tcp()[:n]),1)
         for index,value in ((14,0x44),(46,0x40),(46,0xf0),(47,3),(47,6),(47,5)):
             data = bytearray(tcp()); data[index]=value
