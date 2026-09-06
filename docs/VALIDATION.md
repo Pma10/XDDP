@@ -6,6 +6,17 @@ by the repository's GitHub Actions using the user's local Git authentication.
 
 ## Recorded runs
 
+- [Status isolation and admission efficiency](https://github.com/Pma10/XDDP/actions/runs/34038734710)
+  for commit `6b18ee9`: **PASS** in both jobs. Twenty Rust tests, fourteen
+  Python controller tests and ten privileged XDP tests passed. Both PROXY v2
+  integration modes verified that held status sessions at their cap leave room
+  for a new same-IP login while an existing relay continues transferring bytes.
+  Capacity rejection and backend connection failure did not add churn; impossible
+  phase lengths were rejected without a body. Unit tests retained maximum signed
+  schema blobs, Unicode names and custom mappings, exact split/coalesced framing,
+  and backward-compatible configuration. C ASan/UBSan checks and native veth
+  attach/PMTU/replacement/detach also passed. State layouts remain 17/224/64 bytes.
+  These are bounded functional scenarios, not throughput, RSS or PvP measurements.
 - [Admission and generation hardening](https://github.com/Pma10/XDDP/actions/runs/34037555184)
   for commit `28d428d`: **PASS** in both jobs. Sixteen Rust tests and fourteen
   Python controller tests passed on Debian; ten XDP tests passed in the privileged
