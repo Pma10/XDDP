@@ -1,0 +1,39 @@
+{
+  "interface": "eth0",
+  "xdp_mode": "driver",
+  "pin_dir": "/sys/fs/bpf/xddp/v1",
+  "object": "/usr/local/lib/xddp/xdp_ddos.bpf.o",
+  "loader": "/usr/local/libexec/xddp-loader",
+  "socket": "/run/xddp/control.sock",
+  "runtime_file": "/run/xddp/runtime.json",
+  "metrics_file": "/run/xddp/xdp.prom",
+  "gate_metrics": "http://127.0.0.1:9109/metrics",
+  "observe": true,
+  "manual_mode": "normal",
+  "lease_seconds": 10,
+  "ipv6": false,
+  "drop_tcp_fragments": false,
+  "owned_prefixes": [],
+  "protected_tcp_ports": [25565],
+  "drop_tcp_ports": [],
+  "drop_udp_ports": [],
+  "allow_prefixes": [],
+  "block_prefixes": [],
+  "bogon_prefixes": [],
+  "syn_per_cpu": {
+    "normal": {"rate": 0, "burst": 0},
+    "elevated": {"rate": 0, "burst": 0},
+    "attack": {"rate": 0, "burst": 0},
+    "emergency": {"rate": 0, "burst": 0}
+  },
+  "adaptive": {
+    "up_samples": 3,
+    "down_samples": 30,
+    "cooldown_seconds": 60,
+    "thresholds": {
+      "elevated": {},
+      "attack": {},
+      "emergency": {}
+    }
+  }
+}

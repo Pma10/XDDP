@@ -1,0 +1,51 @@
+{
+  "listen": "127.0.0.1:25565",
+  "backend": "127.0.0.1:25566",
+  "metrics": "127.0.0.1:9109",
+  "proxy_v2": false,
+  "allow_backend_identity_loss": true,
+  "ipv6": false,
+  "observe": true,
+  "runtime_file": "/run/xddp/runtime.json",
+  "workers": 2,
+  "relay_buffer": 8192,
+  "limits": {
+    "total_sockets": 10000,
+    "prelogin": 512,
+    "admitted": 4096,
+    "backend": 4097,
+    "connections_ip": 0,
+    "connections_prefix": 0,
+    "ip_entries": 65536,
+    "prefix_entries": 16384,
+    "idle_entry_seconds": 120,
+    "ipv4_prefix": 24,
+    "ipv6_prefix": 64,
+    "ip": {"connect": {"per_second": 0, "burst": 0}, "handshake": {"per_second": 0, "burst": 0}, "status": {"per_second": 0, "burst": 0}, "login": {"per_second": 0, "burst": 0}},
+    "prefix": {"connect": {"per_second": 0, "burst": 0}, "handshake": {"per_second": 0, "burst": 0}, "status": {"per_second": 0, "burst": 0}, "login": {"per_second": 0, "burst": 0}},
+    "global": {"connect": {"per_second": 0, "burst": 0}, "handshake": {"per_second": 0, "burst": 0}, "status": {"per_second": 0, "burst": 0}, "login": {"per_second": 0, "burst": 0}},
+    "mode_multipliers": [1.0, 0.8, 0.5, 0.1],
+    "churn_score_threshold": 0,
+    "churn_half_life_seconds": 30,
+    "penalty_seconds": 10
+  },
+  "timeouts": {"first_progress_ms": 3000, "progress_ms": 3000, "handshake_ms": 10000, "login_ms": 10000, "status_ms": 5000, "backend_ms": 3000, "shutdown_seconds": 60},
+  "protocol": {
+    "max_frame": 16384,
+    "max_initial_bytes": 32768,
+    "max_host_bytes": 1024,
+    "allow_host_suffix": true,
+    "allowed_hosts": [],
+    "allowed_ports": [],
+    "strict_username": false,
+    "login_schemas": {}
+  },
+  "cache": {
+    "host": "localhost",
+    "port": 25565,
+    "protocol": 47,
+    "ttl_seconds": 5,
+    "max_response_bytes": 32768,
+    "fallback": {"version": {"name": "Minecraft", "protocol": 47}, "players": {"max": 0, "online": 0}, "description": {"text": "Status temporarily unavailable"}}
+  }
+}
