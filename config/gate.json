@@ -12,6 +12,7 @@
   "limits": {
     "total_sockets": 10000,
     "prelogin": 512,
+    "status_connections": 128,
     "admitted": 4096,
     "backend": 4097,
     "connections_ip": 0,

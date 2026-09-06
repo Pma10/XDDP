@@ -8,6 +8,20 @@ pub struct Rate {
     pub burst: f64,
 }
 
+#[cfg(test)] mod tests {
+    use super::*;
+    #[test] fn status_capacity_is_optional_and_bounded_by_prelogin() {
+        let mut raw:serde_json::Value=serde_json::from_str(include_str!("../../config/gate.json")).unwrap();
+        raw["limits"].as_object_mut().unwrap().remove("status_connections");
+        let mut c:Config=serde_json::from_value(raw).unwrap();
+        assert_eq!(c.limits.status_connections,0); assert!(c.validate().is_ok());
+        c.limits.status_connections=c.limits.prelogin;
+        assert!(c.validate().is_ok());
+        c.limits.status_connections+=1;
+        assert!(c.validate().is_err());
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Rates {
@@ -25,6 +39,8 @@ impl Rates {
 pub struct Limits {
     pub total_sockets: usize,
     pub prelogin: usize,
+    #[serde(default)]
+    pub status_connections: usize,
     pub admitted: usize,
     pub backend: usize,
     pub connections_ip: usize,
@@ -123,6 +139,7 @@ impl Config {
             return Err("PROXY v2 requires matching listener/backend address families in this gate".into());
         }
         if l.total_sockets < 4 || l.total_sockets > 100000 || l.prelogin == 0 ||
+            l.status_connections > l.prelogin ||
             l.admitted == 0 || l.backend < 2 || l.prelogin + l.admitted + l.backend > l.total_sockets ||
             l.ip_entries < 64 || l.ip_entries > 1_000_000 || l.prefix_entries < 64 ||
             l.prefix_entries > 1_000_000 || l.ip_entries % 64 != 0 || l.prefix_entries % 64 != 0 ||

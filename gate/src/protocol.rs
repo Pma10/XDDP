@@ -36,22 +36,24 @@ pub fn frame(body: &[u8]) -> Vec<u8> {
     out.extend_from_slice(body);
     out
 }
-pub struct Frame { pub body: Vec<u8>, pub wire: Vec<u8> }
+pub struct Frame { pub wire: Vec<u8>, body_offset: usize }
+impl Frame { pub fn body(&self) -> &[u8] { &self.wire[self.body_offset..] } }
 
 pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R, max: usize,
     remaining: &mut usize, deadline: Instant, progress: Duration,
     first_progress: Duration) -> Result<Frame, Error>
 {
-    let mut prefix = Vec::with_capacity(5);
+    let mut prefix = [0;5];
+    let mut used = 0;
     let len;
     loop {
         let mut b = [0];
-        let wait = if prefix.is_empty() { first_progress } else { progress };
-        read_bounded(r, &mut b, deadline, wait).await?;
         if *remaining == 0 { return Err(Error::Oversized); }
+        let wait = if used == 0 { first_progress } else { progress };
+        read_bounded(r, &mut b, deadline, wait).await?;
         *remaining -= 1;
-        prefix.push(b[0]);
-        if let Some((n, _)) = varint(&prefix)? {
+        prefix[used] = b[0]; used += 1;
+        if let Some((n, _)) = varint(&prefix[..used])? {
             if n <= 0 { return Err(Error::Invalid); }
             len = n as usize;
             break;
@@ -59,11 +61,11 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R, max: usize,
     }
     if len > max || len > *remaining { return Err(Error::Oversized); }
     *remaining -= len;
-    let mut body = vec![0; len];
-    read_bounded(r, &mut body, deadline, progress).await?;
-    let mut wire = prefix;
-    wire.extend_from_slice(&body);
-    Ok(Frame { body, wire })
+    // Preserve exact framing in one allocation; parsers borrow the body slice.
+    let mut wire = vec![0; used + len];
+    wire[..used].copy_from_slice(&prefix[..used]);
+    read_bounded(r, &mut wire[used..], deadline, progress).await?;
+    Ok(Frame { wire, body_offset:used })
 }
 async fn read_bounded<R: AsyncRead + Unpin>(r: &mut R, mut out: &mut [u8],
     absolute: Instant, progress: Duration) -> Result<(), Error>
@@ -111,6 +113,10 @@ impl<'a> Cursor<'a> {
 }
 #[derive(Debug)]
 pub struct Handshake { pub version: i32, pub state: i32 }
+pub fn handshake_max(cfg: &Protocol) -> usize {
+    // ID + version + host length (host cap <=4096) + host + port + state.
+    cfg.max_frame.min(1 + 5 + 2 + cfg.max_host_bytes + 2 + 1)
+}
 pub fn handshake(data: &[u8], cfg: &Protocol) -> Result<Handshake, Error> {
     let mut c = Cursor::new(data);
     if c.int()? != 0 { return Err(Error::Invalid); }
@@ -131,7 +137,26 @@ pub fn handshake(data: &[u8], cfg: &Protocol) -> Result<Handshake, Error> {
     c.finish()?;
     Ok(Handshake { version, state })
 }
+fn login_schema(version: i32, cfg: &Protocol) -> Result<&str, Error> {
+    Ok(match cfg.login_schemas.get(&version) {
+        Some(schema) => schema.as_str(),
+        None => match version {
+            4..=758 => "legacy", 759 => "signed", 760 => "signed_uuid",
+            761..=763 => "optional_uuid", 764..=775 => "uuid", _ => return Err(Error::Unsupported),
+        },
+    })
+}
+pub fn login_max(version: i32, cfg: &Protocol) -> Result<usize, Error> {
+    // Bounds mirror the accepted schemas, including the full signed-key blobs.
+    let extra = match login_schema(version,cfg)? {
+        "legacy" => 0, "signed" => 1+8+2+4096+2+4096,
+        "signed_uuid" => 1+8+2+4096+2+4096+17,
+        "optional_uuid" => 17, "uuid" => 16, _ => return Err(Error::Unsupported),
+    };
+    Ok(cfg.max_frame.min(1+1+64+extra))
+}
 pub fn login(data: &[u8], version: i32, cfg: &Protocol) -> Result<(), Error> {
+    let schema = login_schema(version,cfg)?;
     let mut c = Cursor::new(data);
     if c.int()? != 0 { return Err(Error::Invalid); }
     let name = c.string(64)?;
@@ -139,13 +164,6 @@ pub fn login(data: &[u8], version: i32, cfg: &Protocol) -> Result<(), Error> {
         (cfg.strict_username && !name.bytes().all(|x| x.is_ascii_alphanumeric() || x == b'_')) {
         return Err(Error::Invalid);
     }
-    let schema = match cfg.login_schemas.get(&version) {
-        Some(schema) => schema.as_str(),
-        None => match version {
-            4..=758 => "legacy", 759 => "signed", 760 => "signed_uuid",
-            761..=763 => "optional_uuid", 764..=775 => "uuid", _ => return Err(Error::Unsupported),
-        },
-    };
     if schema == "signed" || schema == "signed_uuid" {
         if c.boolean()? { c.bytes(8)?; c.blob(4096)?; c.blob(4096)?; }
     }
@@ -215,7 +233,8 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(2);
         let f = read_frame(&mut rx, 256, &mut remaining, deadline, Duration::from_secs(1), Duration::from_secs(1)).await.unwrap();
         assert_eq!(f.wire, expected);
-        assert_eq!(read_frame(&mut rx, 256, &mut remaining, deadline, Duration::from_secs(1), Duration::from_secs(1)).await.unwrap().body, [0]);
+        assert_eq!(f.body(), body);
+        assert_eq!(read_frame(&mut rx, 256, &mut remaining, deadline, Duration::from_secs(1), Duration::from_secs(1)).await.unwrap().body(), [0]);
         let mut huge = &[255,255,127][..];
         assert!(matches!(read_frame(&mut huge, 256, &mut remaining, deadline, Duration::from_secs(1), Duration::from_secs(1)).await, Err(Error::Oversized)));
     }
@@ -226,5 +245,42 @@ mod tests {
             Duration::from_secs(1), Duration::from_secs(1)).await, Err(Error::Deadline)));
         assert!(matches!(read_frame(&mut rx, 64, &mut n, Instant::now() + Duration::from_secs(1),
             Duration::from_millis(15), Duration::from_millis(15)).await, Err(Error::Slow)));
+    }
+    #[test] fn phase_bounds_preserve_supported_schema_payloads() {
+        let c=cfg();
+        let h=status_handshake(&"h".repeat(c.max_host_bytes),25565,-1);
+        let (_,offset)=varint(&h).unwrap().unwrap();
+        assert!(handshake(&h[offset..],&c).is_ok());
+        assert!(h.len()-offset<=handshake_max(&c));
+        for version in [47,759,760,761,764] {
+            // 16 three-byte UTF-8 characters are valid in non-strict mode.
+            let name="\u{754c}".repeat(16);
+            let mut b=vec![0]; put_varint(name.len() as i32,&mut b); b.extend(name.as_bytes());
+            if version==759 || version==760 {
+                b.push(1); b.extend([0;8]);
+                for _ in 0..2 { put_varint(4096,&mut b); b.extend([7;4096]); }
+            }
+            if version==760 || version==761 { b.push(1); b.extend([0;16]); }
+            if version==764 { b.extend([0;16]); }
+            assert!(login(&b,version,&c).is_ok());
+            assert!(b.len()<=login_max(version,&c).unwrap());
+        }
+        let mut custom=c.clone(); custom.login_schemas.insert(9999,"signed_uuid".into());
+        assert_eq!(login_max(9999,&custom),login_max(760,&c));
+        assert_eq!(login_max(9999,&c),Err(Error::Unsupported));
+    }
+    #[tokio::test] async fn phase_length_rejection_never_reads_the_body() {
+        for max in [1,9,handshake_max(&cfg()),login_max(47,&cfg()).unwrap()] {
+            let wire=frame(&vec![0;max+1]);
+            let (_,prefix)=varint(&wire).unwrap().unwrap();
+            let mut input=wire.as_slice(); let mut left=32768;
+            assert!(matches!(read_frame(&mut input,max,&mut left,Instant::now()+Duration::from_secs(1),
+                Duration::from_secs(1),Duration::from_secs(1)).await,Err(Error::Oversized)));
+            assert_eq!(input.len(),wire.len()-prefix);
+        }
+        let mut input=&[1,0][..]; let mut left=0;
+        assert!(matches!(read_frame(&mut input,1,&mut left,Instant::now()+Duration::from_secs(1),
+            Duration::from_secs(1),Duration::from_secs(1)).await,Err(Error::Oversized)));
+        assert_eq!(input,&[1,0]);
     }
 }

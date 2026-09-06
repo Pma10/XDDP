@@ -15,7 +15,7 @@ use tokio::{io::AsyncWriteExt, net::{TcpListener,TcpStream}, sync::{OwnedSemapho
 struct State {
     cfg:Arc<Config>, metrics:Arc<Metrics>, limiter:Arc<Limiter>, runtime:Arc<runtime::Runtime>,
     cache:Arc<cache::StatusCache>, sockets:Arc<Semaphore>, prelogin:Arc<Semaphore>,
-    admitted:Arc<Semaphore>, backend:Arc<Semaphore>,
+    admitted:Arc<Semaphore>, backend:Arc<Semaphore>, status:Arc<Semaphore>,
 }
 struct PreloginTime { start:Instant, metrics:Arc<Metrics> }
 impl Drop for PreloginTime {
@@ -48,6 +48,7 @@ async fn run(cfg:Config) -> Result<(),Box<dyn std::error::Error>> {
         limiter:Limiter::new(cfg.limits.clone(),m.clone()), runtime:runtime::Runtime::new(if cfg.runtime_file.is_empty() {cfg.observe} else {true}),
         cache:cache::StatusCache::new(&cfg), sockets:Arc::new(Semaphore::new(cfg.limits.total_sockets)),
         prelogin:Arc::new(Semaphore::new(cfg.limits.prelogin)), admitted:Arc::new(Semaphore::new(cfg.limits.admitted)),
+        status:Arc::new(Semaphore::new(if cfg.limits.status_connections == 0 {cfg.limits.prelogin} else {cfg.limits.status_connections})),
         backend:Arc::new(Semaphore::new(cfg.limits.backend-1)), cfg:Arc::new(cfg), metrics:m.clone(),
     });
     tokio::spawn(metrics::serve(metrics_listener,m));
@@ -112,42 +113,53 @@ fn record_error(m:&Metrics,e:protocol::Error) {
     match e { VarInt=>m.inc(8), Oversized=>m.inc(9), Unsupported=>m.inc(10),
         Deadline=>m.inc(11), Slow=>m.inc(12), Invalid=>m.inc(5), Eof|Io=>{} }
 }
-async fn phase(client:&mut TcpStream,s:&State,left:&mut usize,ms:u64,first_ms:u64) -> Result<protocol::Frame,protocol::Error> {
-    protocol::read_frame(client,s.cfg.protocol.max_frame,left,Instant::now()+Duration::from_millis(ms),
-        Duration::from_millis(s.cfg.timeouts.progress_ms),Duration::from_millis(first_ms)).await
+async fn phase(client:&mut TcpStream,s:&State,left:&mut usize,ms:u64,max:usize) -> Result<protocol::Frame,protocol::Error> {
+    protocol::read_frame(client,s.cfg.protocol.max_frame.min(max),left,Instant::now()+Duration::from_millis(ms),
+        Duration::from_millis(s.cfg.timeouts.progress_ms),Duration::from_millis(s.cfg.timeouts.progress_ms)).await
 }
 async fn handle(mut client:TcpStream,peer:SocketAddr,s:Arc<State>,mut ticket:Ticket,admission:Admission) -> Result<(),protocol::Error> {
     use protocol::Error;
     client.set_nodelay(true).map_err(|_|Error::Io)?;
     let mut left = s.cfg.protocol.max_initial_bytes;
     // Start the absolute handshake deadline at accept, not when a task gets CPU.
-    let handshake = protocol::read_frame(&mut client,s.cfg.protocol.max_frame,&mut left,
+    let handshake = protocol::read_frame(&mut client,protocol::handshake_max(&s.cfg.protocol),&mut left,
         admission.duration.start+Duration::from_millis(s.cfg.timeouts.handshake_ms),
         Duration::from_millis(s.cfg.timeouts.progress_ms),Duration::from_millis(s.cfg.timeouts.first_progress_ms)).await?;
-    let h = protocol::handshake(&handshake.body,&s.cfg.protocol)?;
+    let h = protocol::handshake(handshake.body(),&s.cfg.protocol)?;
     ticket.handshake = true; s.metrics.inc(4);
     let (p,blocked) = s.runtime.policy(peer.ip());
-    if blocked || !s.limiter.event(&ticket,Event::Handshake,p) { return Ok(()); }
+    if blocked || !s.limiter.event(&ticket,Event::Handshake,p) { ticket.server_rejected = true; return Ok(()); }
     if h.state == 1 {
-        let request = phase(&mut client,&s,&mut left,s.cfg.timeouts.status_ms,s.cfg.timeouts.progress_ms).await?;
-        protocol::status_request(&request.body)?; s.metrics.inc(6);
+        // Status sessions remain inside prelogin's total cap, but cannot occupy
+        // all its slots when an operator enables a smaller status cap.
+        let Ok(_status) = s.status.clone().try_acquire_owned() else {
+            s.metrics.inc(20); s.metrics.inc(37); ticket.server_rejected = true; return Ok(());
+        };
+        let _status_gauge = Gauge::new(s.metrics.clone(),36);
+        drop(handshake);
+        let request = phase(&mut client,&s,&mut left,s.cfg.timeouts.status_ms,1).await?;
+        protocol::status_request(request.body())?; s.metrics.inc(6);
         let (p,blocked) = s.runtime.policy(peer.ip());
-        if blocked || !s.limiter.event(&ticket,Event::Status,p) { return Ok(()); }
+        if blocked || !s.limiter.event(&ticket,Event::Status,p) { ticket.server_rejected = true; return Ok(()); }
         let response = s.cache.get(&s.metrics);
         timeout(Duration::from_millis(s.cfg.timeouts.status_ms),client.write_all(&response)).await.map_err(|_|Error::Deadline)?.map_err(|_|Error::Io)?;
         // A successful status-only client may close without a ping; do not score it as churn.
         ticket.status_complete = true;
-        let ping = phase(&mut client,&s,&mut left,s.cfg.timeouts.status_ms,s.cfg.timeouts.progress_ms).await?;
-        protocol::ping(&ping.body)?;
+        let ping = phase(&mut client,&s,&mut left,s.cfg.timeouts.status_ms,9).await?;
+        protocol::ping(ping.body())?;
         timeout(Duration::from_millis(s.cfg.timeouts.status_ms),client.write_all(&ping.wire)).await.map_err(|_|Error::Deadline)?.map_err(|_|Error::Io)?;
         return Ok(());
     }
-    let login = phase(&mut client,&s,&mut left,s.cfg.timeouts.login_ms,s.cfg.timeouts.progress_ms).await?;
-    protocol::login(&login.body,h.version,&s.cfg.protocol)?; s.metrics.inc(7);
+    let login = phase(&mut client,&s,&mut left,s.cfg.timeouts.login_ms,protocol::login_max(h.version,&s.cfg.protocol)?).await?;
+    protocol::login(login.body(),h.version,&s.cfg.protocol)?; s.metrics.inc(7);
     let (p,blocked) = s.runtime.policy(peer.ip());
-    if blocked || (!p.observe && p.mode == 3) || !s.limiter.event(&ticket,Event::Login,p) { return Ok(()); }
+    if blocked || (!p.observe && p.mode == 3) || !s.limiter.event(&ticket,Event::Login,p) {
+        ticket.server_rejected = true; return Ok(());
+    }
     let (Ok(admitted),Ok(backend_slot),Ok(backend_socket)) = (s.admitted.clone().try_acquire_owned(),
-        s.backend.clone().try_acquire_owned(),s.sockets.clone().try_acquire_owned()) else { s.metrics.inc(20); return Ok(()); };
+        s.backend.clone().try_acquire_owned(),s.sockets.clone().try_acquire_owned()) else {
+        s.metrics.inc(20); ticket.server_rejected = true; return Ok(());
+    };
     let (_admitted,_backend_slot,_backend_socket) = (admitted,backend_slot,backend_socket);
     let _backend_gauge = Gauge::new(s.metrics.clone(),3);
     s.metrics.inc(31);
@@ -158,7 +170,7 @@ async fn handle(mut client:TcpStream,peer:SocketAddr,s:Arc<State>,mut ticket:Tic
         backend.write_all(&handshake.wire).await?; backend.write_all(&login.wire).await?;
         Ok::<_,std::io::Error>(backend)
     }).await;
-    let mut backend = match backend { Ok(Ok(b))=>b, _=>{s.metrics.inc(17); return Ok(());} };
+    let mut backend = match backend { Ok(Ok(b))=>b, _=>{s.metrics.inc(17); ticket.server_rejected = true; return Ok(());} };
     let _admitted_gauge = Gauge::new(s.metrics.clone(),30);
     ticket.admitted = true;
     // Keep identity concurrency accounting until relay ends; no hot-path limiter locks.

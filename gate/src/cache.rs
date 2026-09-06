@@ -40,7 +40,7 @@ async fn poll(c: &Config) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + 
     let mut left = c.cache.max_response_bytes + 5;
     let duration = Duration::from_millis(c.timeouts.backend_ms);
     let f = protocol::read_frame(&mut s, c.cache.max_response_bytes, &mut left, Instant::now()+duration, duration, duration).await?;
-    let mut cursor = Cursor::new(&f.body);
+    let mut cursor = Cursor::new(f.body());
     if cursor.int()? != 0 { return Err("invalid backend status id".into()); }
     let text = cursor.string(c.cache.max_response_bytes)?;
     let value: serde_json::Value = serde_json::from_str(text)?;

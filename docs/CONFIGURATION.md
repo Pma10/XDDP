@@ -58,6 +58,18 @@ must be multiples of 64. Saturated shards reject new identities until entries
 expire. Active entries are never evicted. A sweep visits one shard per 100 ms;
 an idle entry may outlive `idle_entry_seconds` by approximately 6.4 seconds.
 
+`status_connections` caps simultaneous sessions identified by a valid status
+handshake, including those waiting to send the request or ping. They still count
+toward `prelogin` and all socket/source caps. The example allows 128 status
+sessions inside 512 prelogin slots, leaving space for login and unclassified
+handshakes. This is a staging resource allocation, not a measured production
+threshold. Missing/zero keeps the previous shared-cap behavior; a nonzero value
+must not exceed `prelogin`. At the cap, excess status clients are closed without
+waiting in a queue or accruing churn. Monitor `active_status` and
+`status_capacity_limited` when sizing for legitimate browser/monitor bursts.
+This does not reserve bandwidth or global connect/handshake tokens, and clients
+that have not supplied a valid handshake still share the initial prelogin cap.
+
 Churn includes pre-admission disconnects and admitted clients closing within
 `churn_window_seconds`. Successful status clients are exempt from churn scoring.
 An incomplete handshake contributes 1, other short incomplete/early sessions
@@ -65,6 +77,9 @@ An incomplete handshake contributes 1, other short incomplete/early sessions
 a temporary penalty. All penalty thresholds start disabled. Neither a score
 nor any single behavior permanently blocks an IP or prefix. One IP is not one
 player. Set rates and bursts from measured large NAT joins and reconnects.
+Gate-initiated policy/cap rejection and backend connection/write failure before
+relay do not accrue churn: an unavailable server must not penalize retrying
+players or their shared NAT. Malformed or incomplete client input still counts.
 
 Handshake/status/login tokens are charged only after IP, prefix and global policy
 accepts the event. An enforced source rejection cannot spend a shared prefix or
@@ -75,6 +90,14 @@ clients later rejected by source policy. Observation records candidates and
 charges available buckets without creating token debt.
 
 ## Minecraft compatibility
+
+Frame length checks also use the current phase's accepted wire layout before
+allocating or reading the body: status request is one byte, ping is nine bytes,
+handshake is bounded by the configured host limit, and Login Start by its selected
+schema. Signed-key schemas retain their full permitted blob lengths; custom
+version mappings use the same schema bounds. Global frame/initial-byte limits
+still apply. Valid frames keep their original bytes in one buffer, with parsers
+borrowing a body slice; split/coalesced delivery requires no extra client exchange.
 
 Handshake accepts status nextState=1 and login nextState=2. Zero ports, invalid
 UTF-8, empty/control-character base host, unsupported state and trailing bytes

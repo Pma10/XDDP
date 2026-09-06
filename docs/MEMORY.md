@@ -86,9 +86,12 @@ These estimates intentionally include hash capacity jumps; they are not RSS
 measurements. Defaults for both tables are roughly 45 MiB combined under the
 same conservative capacity model. Empty tables allocate incrementally.
 
-Default pre-login framing allocates at most twice the 32 KiB initial wire budget
-per client (wire preservation plus parsed bodies): approximately 32 MiB at 512
-prelogin slots, plus futures, tickets, semaphores and task/allocator overhead.
+Pre-login framing stores each frame once, with the parsed body borrowing a slice
+of the original wire buffer. Payload storage is bounded by the 32 KiB initial
+wire budget per client: conservatively 16 MiB at 512 prelogin slots, plus futures,
+tickets, semaphores and task/allocator overhead. Phase-specific length checks
+usually impose a smaller bound and reject impossible lengths before allocation.
+Status slots are a subset of prelogin slots, not an additional socket pool.
 Relay buffers are 8 KiB per direction: approximately 64 MiB at 4,096 admitted
 clients. Cache is one bounded response plus bounded parsing/fallback buffers.
 Application memory remains bounded, but these values exclude kernel TCP buffers.

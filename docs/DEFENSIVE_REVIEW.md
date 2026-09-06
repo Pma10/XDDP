@@ -26,7 +26,7 @@ separate acceptance gates.
 | Login floods | Complete handshake/Login Start first; distinct scope/global login budget and backend cap | Syntactically valid logins are not authenticated players |
 | Malformed Minecraft | Strict frame/VarInt/UTF-8/state/structure/trailing-byte checks | Signatures, auth, compression/encryption and later protocol belong to backend |
 | Partial/overlong VarInt | Up to five bytes, overflow/noncanonical forms rejected, exact bounded reads | Deliberately strict encoding may reject nonconforming custom clients |
-| Huge declared lengths | Bound before heap allocation; total wire budget across phases | A bounded frame has duplicate body/wire storage during validation |
+| Huge declared lengths | Phase/schema bounds before heap allocation; total wire budget across phases; one wire buffer | Accepted bounded frames and kernel receive queues still consume memory |
 | Backend exhaustion | No per-player backend before admission, finite connect/write deadline, backend semaphore | Existing admitted sockets can persist; backend auth/idle controls remain necessary |
 | Log I/O DoS | Fixed counters, no per-packet/client rejection logs | Startup/fatal service failures still log and have restart backoff |
 | Lock contention | Per-CPU XDP mutation, random sharded L7 mutexes only during admission/close | Hot legitimate NAT/prefix admissions can contend; benchmark before tuning |
@@ -65,6 +65,13 @@ separate acceptance gates.
   program, rejecting mixed generations before policy or attachment changes.
 - Publication and lease failures stop further controller renewal; cleanup still
   attempts kernel expiry and socket removal if runtime publication fails.
+- Status sessions can be capped within the prelogin pool so waiting status pings
+  cannot occupy every login slot. This does not classify silent handshakes or
+  protect the global accept budget from an overwhelming connection flood.
+- Server-side admission rejection and backend failure before relay do not add
+  source/prefix churn penalties. Resource accounting is still released normally.
+- Initial frames use one allocation and phase/schema length bounds before body
+  reads. Valid status/login flows need no artificial delay or challenge exchange.
 
 ## Explicit scope decisions
 

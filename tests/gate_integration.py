@@ -100,8 +100,8 @@ async def run(binary,proxy_v2=False):
     cfg = json.loads((ROOT/"config/gate.json").read_text())
     cfg.update(listen=f"127.0.0.1:{public}",backend=f"127.0.0.1:{backend_port}",metrics=f"127.0.0.1:{metric}",runtime_file="")
     cfg.update(proxy_v2=proxy_v2,allow_backend_identity_loss=not proxy_v2)
-    cfg["limits"].update(total_sockets=64,prelogin=8,admitted=16,backend=17,ip_entries=128,prefix_entries=128)
-    cfg["timeouts"].update(first_progress_ms=200,progress_ms=200,handshake_ms=1500,login_ms=500,status_ms=500,shutdown_seconds=1)
+    cfg["limits"].update(total_sockets=64,prelogin=8,status_connections=2,admitted=16,backend=17,ip_entries=128,prefix_entries=128)
+    cfg["timeouts"].update(first_progress_ms=200,progress_ms=1000,handshake_ms=1500,login_ms=500,status_ms=1500,shutdown_seconds=1)
     cfg["cache"]["ttl_seconds"] = 300
     logins = 0
     with tempfile.TemporaryDirectory() as tmp:
@@ -152,6 +152,59 @@ async def run(binary,proxy_v2=False):
                     w.close(); await w.wait_closed()
                 assert counts["status"] == before
 
+                # Held status sessions cannot consume every login slot. Existing
+                # relays and a new same-IP login must keep working at the cap.
+                live_reader,live_writer=await asyncio.open_connection("127.0.0.1",public)
+                expected_ports.append(live_writer.get_extra_info("sockname")[1])
+                live_writer.write(handshake()+LOGIN); await live_writer.drain()
+                assert await asyncio.wait_for(live_reader.readexactly(8),2)==b"admitted"
+                logins+=1
+                held_status=[]
+                for _ in range(2):
+                    r,w=await asyncio.open_connection("127.0.0.1",public)
+                    w.write(handshake(1)+frame(b"\0")); await w.drain()
+                    assert b'"cached"' in await asyncio.wait_for(readframe(r),2)
+                    held_status.append((r,w))
+                before_churn=(await metrics(metric))["churn"]
+                r,w=await asyncio.open_connection("127.0.0.1",public)
+                w.write(handshake(1)); await w.drain()
+                assert await asyncio.wait_for(r.read(),2)==b""
+                w.close(); await w.wait_closed()
+                capped=await metrics(metric)
+                assert capped["active_status"]==2
+                assert capped["status_capacity_limited"]>=1
+                assert capped["churn"]==before_churn
+                live_writer.write(b"existing-player"); await live_writer.drain()
+                assert await asyncio.wait_for(live_reader.readexactly(15),2)==b"existing-player"
+                r,w=await asyncio.open_connection("127.0.0.1",public)
+                expected_ports.append(w.get_extra_info("sockname")[1])
+                w.write(handshake()+LOGIN); await w.drain()
+                assert await asyncio.wait_for(r.readexactly(8),2)==b"admitted"
+                logins+=1
+                w.close(); await w.wait_closed()
+                for reader,writer in held_status:
+                    ping=b"\x01"+b"12345678"
+                    writer.write(frame(ping)); await writer.drain()
+                    assert await asyncio.wait_for(readframe(reader),2)==ping
+                    writer.close(); await writer.wait_closed()
+                live_writer.close(); await live_writer.wait_closed()
+
+                # Impossible phase lengths are rejected from the length prefix,
+                # without waiting for the attacker to deliver a body.
+                oversize_before=(await metrics(metric))["oversized_packet"]
+                for wire in (vi(2048),handshake()+vi(100),handshake(1)+vi(2)):
+                    r,w=await asyncio.open_connection("127.0.0.1",public)
+                    w.write(wire); await w.drain()
+                    assert await asyncio.wait_for(r.read(),2)==b""
+                    w.close(); await w.wait_closed()
+                r,w=await asyncio.open_connection("127.0.0.1",public)
+                w.write(handshake(1)+frame(b"\0")); await w.drain()
+                await asyncio.wait_for(readframe(r),2)
+                w.write(vi(10)); await w.drain()
+                assert await asyncio.wait_for(r.read(),2)==b""
+                w.close(); await w.wait_closed()
+                assert (await metrics(metric))["oversized_packet"]>=oversize_before+4
+
                 bad = [b"\x80"*5,b"\xff\xff\x7f",b"\x80\x00",handshake()+frame(b"\x01\x00"),
                        handshake()+frame(b"\x00\x40"+b"a"*64),handshake(3),handshake()+LOGIN+b"more"]
                 # Last entry is valid admission and is intentionally excluded from rejection fixtures.
@@ -189,12 +242,26 @@ async def run(binary,proxy_v2=False):
                 await asyncio.sleep(0.3)
                 final = await metrics(metric)
                 assert final["active_prelogin"] == 0
+                assert final["active_status"] == 0
                 assert final["admitted_clients"] == 0
                 assert final["invalid_varint"] >= 2
                 assert final["oversized_packet"] >= 1
                 assert final["slow_connection"] >= 3
                 assert counts["login"] == logins
-                print(f"PASS: proxy_v2={proxy_v2}, split/coalesced admission, opaque relay, half-close, status cache/ping, malformed input, deadlines, capacity and reconnect cleanup")
+                # An unavailable backend must not give a valid client or its NAT
+                # a churn penalty when the gate itself closes admission.
+                server.close(); await server.wait_closed()
+                churn_before=final["churn"]
+                failures_before=final["backend_connect_failures"]
+                r,w=await asyncio.open_connection("127.0.0.1",public)
+                w.write(handshake()+LOGIN); await w.drain()
+                assert await asyncio.wait_for(r.read(),2)==b""
+                w.close(); await w.wait_closed()
+                failed=await metrics(metric)
+                assert failed["backend_connect_failures"]==failures_before+1
+                assert failed["churn"]==churn_before
+                assert failed["active_prelogin"]==0
+                print(f"PASS: proxy_v2={proxy_v2}, split/coalesced admission, opaque relay, half-close, status cache/ping isolation, early phase bounds, server rejection without churn, deadlines, capacity and reconnect cleanup")
             finally:
                 process.terminate()
                 try:

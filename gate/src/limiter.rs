@@ -57,14 +57,15 @@ fn subnet(ip: IpAddr, v4: u8, v6: u8) -> IpAddr {
     }
 }
 pub struct Ticket { limiter: Arc<Limiter>, ip: IpAddr, prefix: IpAddr, started: Instant,
-    pub handshake: bool, pub admitted: bool, pub status_complete: bool }
+    pub handshake: bool, pub admitted: bool, pub status_complete: bool, pub server_rejected: bool }
 pub fn state_sizes() -> (usize,usize,usize) {
     (std::mem::size_of::<IpAddr>(),std::mem::size_of::<Entry>(),std::mem::size_of::<Ticket>())
 }
 impl Drop for Ticket {
     fn drop(&mut self) {
         let now = Instant::now();
-        let churn = !self.status_complete && (!self.admitted || self.started.elapsed() < Duration::from_secs(self.limiter.cfg.churn_window_seconds));
+        let churn = !self.server_rejected && !self.status_complete &&
+            (!self.admitted || self.started.elapsed() < Duration::from_secs(self.limiter.cfg.churn_window_seconds));
         if churn { self.limiter.metrics.inc(22); }
         if !self.handshake { self.limiter.metrics.inc(13); }
         for (table, key) in [(&self.limiter.ip, self.ip), (&self.limiter.prefix, self.prefix)] {
@@ -122,7 +123,8 @@ impl Limiter {
             if prefix_ok { net.buckets[0].consume(); }
         }
         i.active += 1; net.active += 1;
-        Some(Ticket { limiter: self.clone(), ip, prefix, started: now, handshake: false, admitted: false, status_complete: false })
+        Some(Ticket { limiter: self.clone(), ip, prefix, started: now, handshake: false, admitted: false,
+            status_complete: false, server_rejected: false })
     }
     pub fn event(&self, t: &Ticket, event: Event, p: Policy) -> bool {
         let now = Instant::now(); let factor = self.cfg.mode_multipliers[p.mode];
@@ -232,6 +234,22 @@ mod tests {
         assert!(l.event(&a,Event::Login,p));
         for _ in 0..20 { assert!(!l.event(&a,Event::Login,p)); }
         assert!(l.event(&b,Event::Login,p));
+    }
+    #[test] fn server_rejection_releases_counts_without_cgnat_penalty() {
+        let mut cfg=config(); cfg.churn_score_threshold=0.1;
+        let m=Arc::new(Metrics::new()); let l=Limiter::new(cfg,m.clone());
+        let p=Policy {mode:0,observe:false,exempt:false};
+        for _ in 0..20 {
+            let mut t=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
+            t.handshake=true; t.server_rejected=true; drop(t);
+        }
+        assert_eq!(m.get(22),0);
+        let mut t=l.accept("192.0.2.2".parse().unwrap(),p).unwrap();
+        let ips=l.ip.shards[l.ip.shard(t.ip)].lock().unwrap();
+        let prefixes=l.prefix.shards[l.prefix.shard(t.prefix)].lock().unwrap();
+        assert_eq!(ips[&t.ip].active,1); assert_eq!(prefixes[&t.prefix].active,1);
+        assert_eq!(prefixes[&t.prefix].score,0.0);
+        drop(prefixes); drop(ips); t.status_complete=true;
     }
     #[test] fn rejected_prefix_preserves_ip_and_global_tokens() {
         let mut cfg=config();
