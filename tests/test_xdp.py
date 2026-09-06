@@ -101,6 +101,39 @@ class XDPTests(unittest.TestCase):
         self.assertEqual(self.run_packet(data),1)
         self.loader("port",self.pin,25565,1)
 
+    def test_vlan_options_ipv6_and_extension_delegation(self):
+        p=tcp()
+        tagged=p[:12]+b"\x81\x00\x00\x01\x08\x00"+p[14:]
+        self.assertEqual(self.run_packet(tagged),2)
+        double=p[:12]+b"\x88\xa8\x00\x01\x81\x00\x00\x02\x08\x00"+p[14:]
+        self.assertEqual(self.run_packet(double),2)
+        options=bytearray(tcp()); options[14]=0x46; options[17]=48
+        options[34:34]=bytes(4); options[50]=0x60; options.extend(bytes(4))
+        self.assertEqual(self.run_packet(options),2)
+        import ipaddress
+        src=ipaddress.IPv6Address("2001:db8::7").packed
+        dst=ipaddress.IPv6Address("2001:db8::1").packed
+        v6=bytes(12)+b"\x86\xdd"+struct.pack("!IHBB16s16s",6<<28,20,6,64,src,dst)+p[34:]
+        self.loader("prefix",self.pin,"owned","add","2001:db8::1/128",1)
+        self.assertEqual(self.run_packet(v6),2)
+        self.loader("prefix",self.pin,"block","add","2001:db8::/32",11)
+        self.assertEqual(self.run_packet(v6),1)
+        self.loader("prefix",self.pin,"allow","add","2001:db8::7/128",1)
+        self.assertEqual(self.run_packet(v6),2)
+        ext=bytearray(v6); ext[20]=0
+        self.assertEqual(self.run_packet(ext),2) # explicit extension-chain deferral
+
+    def test_syn_budget_exempts_ack_and_has_no_dynamic_source_map(self):
+        self.configure(rate=1,burst=1)
+        results=[self.run_packet(tcp(flags=2)) for _ in range(32)]
+        self.assertIn(1,results)
+        for _ in range(8):
+            self.assertEqual(self.run_packet(tcp(flags=0x18,payload=b"abc")),2)
+        stats=json.loads(self.loader("stats",self.pin))
+        self.assertGreater(stats["candidate_reasons"]["syn_rate"],0)
+        self.assertEqual(set(p.name for p in self.pin.iterdir()),
+                         {"configuration","counters","syn_budget","ports","owned","allow","block","program"})
+
 
 if __name__ == "__main__":
     unittest.main()

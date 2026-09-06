@@ -13,7 +13,8 @@ cleanup() {
     ip netns del "$server" 2>/dev/null || true
     ip link del "$left" 2>/dev/null || true
     if [ -d "$pin" ]; then
-        find "$pin" -maxdepth 1 -type f -delete
+        find "$pin" -maxdepth 2 -type f -delete
+        rmdir "$pin/passgen" 2>/dev/null || true
         rmdir "$pin"
     fi
 }
@@ -36,8 +37,19 @@ build/xddp-loader prefix "$pin" owned add 192.0.2.1/32 1
 build/xddp-loader port "$pin" 25565 1
 deadline=$(python3 -c 'import time; print(time.monotonic_ns()+60_000_000_000)')
 build/xddp-loader config "$pin" "$deadline" 0 0 0 0 0 0 1
-ip netns exec "$server" "$(pwd)/build/xddp-loader" attach "$right" "$pin" driver confirmed
+nsenter --net="/run/netns/$server" -- "$(pwd)/build/xddp-loader" attach "$right" "$pin" driver confirmed
 ip netns exec "$client" ping -c 3 -W 1 -M do -s 1372 192.0.2.1
-ip netns exec "$server" "$(pwd)/build/xddp-loader" status "$right" driver
+nsenter --net="/run/netns/$server" -- "$(pwd)/build/xddp-loader" status "$right" driver
 build/xddp-loader stats "$pin"
-echo 'PASS: native veth attach and MTU 1400 ICMP. Production eth0 was not changed.'
+old_id=$(build/xddp-loader id "$pin" | python3 -c 'import json,sys; print(json.load(sys.stdin)["program_id"])')
+mkdir "$pin/passgen"
+build/xddp-loader load build/xdp_pass.bpf.o "$pin/passgen"
+nsenter --net="/run/netns/$server" -- "$(pwd)/build/xddp-loader" attach "$right" "$pin/passgen" driver confirmed "$old_id"
+if nsenter --net="/run/netns/$server" -- "$(pwd)/build/xddp-loader" attach "$right" "$pin" driver confirmed "$old_id"; then
+    echo 'Stale expected-ID replacement unexpectedly succeeded.' >&2
+    exit 1
+fi
+new_id=$(build/xddp-loader id "$pin/passgen" | python3 -c 'import json,sys; print(json.load(sys.stdin)["program_id"])')
+nsenter --net="/run/netns/$server" -- "$(pwd)/build/xddp-loader" detach "$right" driver "$new_id"
+ip netns exec "$client" ping -c 1 -W 1 192.0.2.1
+echo 'PASS: native veth attach, MTU 1400 ICMP, atomic replacement, stale-ID rejection and detach. Production eth0 was not changed.'

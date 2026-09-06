@@ -1,0 +1,128 @@
+# Configuration and metrics
+
+Both JSON schemas reject unknown fields. Startup validation fails for conflicting
+ports, invalid CIDRs, unsupported schema names, zero phase deadlines, NaN/negative
+rates, oversized buffers, impossible resource budgets and non-loopback metrics.
+Rate pair `per_second=0, burst=0` disables that bucket. Nonzero buckets require
+a positive finite rate and burst >=1. SYN budgets use integer rate/burst.
+
+## Observation and modes
+
+XDP observation passes candidate drops, including malformed headers. Counters
+still record the candidate reason. Linux/nftables remains responsible for its
+usual validation. Global RX/bytes/pass/drop counters cover the attached surface;
+SYN counters cover initial SYNs on explicitly owned protected services. UDP and
+ICMP counts cover parsed IP traffic. Per-CPU snapshots are approximate under
+concurrent traffic, not transactional or suitable for billing.
+
+Gate observation records rate/score violations without enforcing them. It still
+enforces frame validation, deadlines, socket/memory bounds and configured
+concurrency caps: observation does not mean forwarding malformed streams to Java.
+No logging is performed per rejected packet or client.
+
+NORMAL/ELEVATED/ATTACK select configured SYN budgets and admission multipliers.
+Rate reductions affect connect/handshake/status/login, never relays. In enforced
+EMERGENCY no new client is admitted, including an allow-listed client. Prefix
+allow-listing exempts source/prefix rate/penalty/deny policy, not hard caps or
+global rate limits. Empty/zero rate configuration stays disabled in every mode.
+The sample nonzero multipliers only scale operator-configured rates; they are
+not production thresholds. All actual rates/transition thresholds require data.
+
+An adaptive threshold entry has `enter` and lower `exit` values. Any available
+signal crossing `enter` selects the corresponding severity. Escalation requires
+consecutive samples and cooldown. De-escalation requires every signal configured
+for the current mode to be present and below `exit`, consecutive samples and
+cooldown, then decreases one mode. Missing telemetry cannot itself escalate or
+justify recovery. Empty bands never trigger a mode. Samples reset after counter
+restart; negative deltas are discarded.
+
+Controller leases use CLOCK_MONOTONIC-compatible nanoseconds for XDP. Gate state
+combines a short wall-clock expiry with a local monotonic receipt deadline and a
+changing generation. Unchanged files do not renew leases. With a nonempty
+`runtime_file`, missing/stale controller state means NORMAL/observation; set
+`runtime_file=""` only for standalone gate operation governed by `observe`.
+
+## Admission bounds
+
+`total_sockets` bounds gate-owned player/cache TCP sockets. The sum of `prelogin`,
+`admitted` and `backend` must fit inside it. One backend slot is reserved for the
+single cache task. Metrics has a separate fixed eight-client limit; allow FD
+headroom for listeners, metrics, epoll, files and runtime infrastructure.
+Backend counters include connecting/reserved attempts. Kernel socket memory is
+additional to Rust buffers and depends on kernel autotuning.
+
+IP/prefix connection caps of zero disable those caps, leaving global resource
+caps. This is the CGNAT-friendly default. Other caps apply even with observation
+or source allow-listing. Source tables have 64 randomly hashed shards; capacities
+must be multiples of 64. Saturated shards reject new identities until entries
+expire. Active entries are never evicted. A sweep visits one shard per 100 ms;
+an idle entry may outlive `idle_entry_seconds` by approximately 6.4 seconds.
+
+Churn includes pre-admission disconnects and admitted clients closing within
+`churn_window_seconds`. Successful status clients are exempt from churn scoring.
+An incomplete handshake contributes 1, other short incomplete/early sessions
+0.25; the score decays with the configured half-life. A nonzero threshold gives
+a temporary penalty. All penalty thresholds start disabled. Neither a score
+nor any single behavior permanently blocks an IP or prefix. One IP is not one
+player. Set rates and bursts from measured large NAT joins and reconnects.
+
+## Minecraft compatibility
+
+Handshake accepts status nextState=1 and login nextState=2. Zero ports, invalid
+UTF-8, empty/control-character base host, unsupported state and trailing bytes
+are rejected. NUL-delimited host suffixes are preserved by default. Set
+`allowed_hosts` and `allowed_ports` for a specific public service if appropriate.
+`allow_host_suffix=false` is an explicit stricter compatibility policy.
+
+Login Start built-in layouts:
+
+| Protocol IDs | Layout |
+| --- | --- |
+| 4–758 | Name only (pre-1.19 layout) |
+| 759 | Name, optional timestamp/key/signature |
+| 760 | Same plus optional UUID |
+| 761–763 | Name, optional UUID |
+| 764–769 | Name, required UUID |
+
+These ranges select a structural layout; they are not proof that every integer
+is a released version. Newer/snapshot/custom versions require a `login_schemas`
+mapping to `legacy`, `signed`, `signed_uuid`, `optional_uuid` or `uuid` after
+checking the actual wire layout. No unchecked trailing-byte escape hatch exists.
+Status permits protocol -1 discovery. Legacy pre-Netty `0xFE` status ping is not
+implemented. A compatibility audit must include the real client/proxy/mod mix.
+
+The gate validates public-key blob lengths, not signatures or player identity.
+Backend online-mode/Velocity handles authentication and subsequent state.
+After Login Start, all stream bytes are opaque, including encryption and plugin
+negotiation. A syntactically valid client can still consume an admitted slot;
+use measured login budgets and backend authentication timeouts.
+
+The cache polls one configured host/version. Multi-host MOTDs or protocol-specific
+status responses need separate gate instances/configurations. Cache TTL expiry
+uses configured fallback JSON rather than unbounded stale data or client-triggered
+refresh. The refresh timeout, response limit and JSON recursion bound apply.
+
+## Metrics
+
+Gate Prometheus: `http://127.0.0.1:9109/metrics`; fixed metric names and no client
+IP labels. Counters include accepts, successful/invalid handshakes, status/login,
+VarInt/size/schema/timeouts, slow/early closes, scope-limited rates, saturation,
+backend errors, churn, cache refresh/fallback and relay errors. Gauges include
+active sockets/prelogin/backend/admitted, identity table occupancy, mode and
+observation. Prelogin sum/count in microseconds and an average in seconds are
+exported. Percentiles require external probe/histogram instrumentation; averages
+must not be used to claim unchanged jitter.
+
+`new_ip_entries` and `new_prefix_entries` count new table insertions, **not exact
+unique identities per second**. Use the bounded offline PCAP baseline tool for
+per-second source/prefix counts, including spoofed SYN observations. See
+[benchmark methodology](BENCHMARKS.md).
+
+XDP textfile: `/run/xddp/xdp.prom`; configure a node_exporter textfile collector
+directory or copy it through an operator-managed collector. `ddosctl stats`
+returns raw machine-readable totals. `candidate_drop{reason=...}` records proposed
+drops in both modes, while `drop_packets` counts actual enforcement. Reserved
+`source_rate`, `prefix_rate` and `global_rate` reasons stay zero: those policies
+are implemented at L7 and total PPS is observation, not blanket gameplay shaping.
+Alarm on stale `xddp_controller_last_update_unix`, controller restart loops,
+backend failures, sustained cap rejection and unexpected IPv6 deferral.

@@ -17,7 +17,7 @@ def main():
     if not 1<=a.max_packets<=1000000:
         p.error("packet cap must be 1..1000000")
     cmd=["tshark","-n","-r",a.pcap,"-c",str(a.max_packets),"-Y","tcp.flags.syn==1 && tcp.flags.ack==0",
-         "-T","fields","-e","frame.time_epoch","-e","ip.src","-e","ipv6.src"]
+         "-T","fields","-E","occurrence=f","-e","frame.time_epoch","-e","ip.src","-e","ipv6.src"]
     proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,text=True)
     second=None; ips=set(); prefixes=set(); count=0; total=0
     with open(a.output,"x",encoding="utf-8") as out:

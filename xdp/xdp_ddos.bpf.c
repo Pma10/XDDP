@@ -64,7 +64,7 @@ static __always_inline int syn_allowed(struct config *c, __u64 now)
     /* Rate bounds validated by controller; cap protects direct map writes. */
     __u32 rate = c->syn_rate > 1000000000U ? 1000000000U : c->syn_rate;
     __u32 burst = c->syn_burst > 1000000U ? 1000000U : c->syn_burst;
-    __u64 cost = 1000000000ULL / rate;
+    __u64 cost = (1000000000ULL + rate - 1) / rate;
     __u64 cap = cost * burst;
     if (!b->last_ns || b->rate != rate || b->burst != burst) {
         b->credit_ns = cap;
