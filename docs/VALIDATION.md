@@ -6,6 +6,15 @@ by the repository's GitHub Actions using the user's local Git authentication.
 
 ## Recorded runs
 
+- [Admission and generation hardening](https://github.com/Pma10/XDDP/actions/runs/34037555184)
+  for commit `28d428d`: **PASS** in both jobs. Sixteen Rust tests and fourteen
+  Python controller tests passed on Debian; ten XDP tests passed in the privileged
+  kernel job. New regressions cover shared-budget preservation, exempt clients,
+  backward timestamps, failed publication/lease updates, independent cleanup,
+  incompatible map geometry and same-layout pins from another program generation.
+  Both PROXY v2 integration modes, C ASan/UBSan checks, native veth attachment,
+  MTU 1400 ICMP, atomic replacement, stale-ID rejection and detach passed.
+  Binary state sizes remain 17/224/64 bytes for identity key/value/ticket.
 - [Final implementation validation](https://github.com/Pma10/XDDP/actions/runs/34028321516)
   for commit `7db2ef0`: **PASS** in both jobs. Debian used libbpf 1.1.2 and
   clang 14. Twelve Rust tests and nine Python controller tests passed; eight

@@ -56,6 +56,15 @@ separate acceptance gates.
   controller instead of renewing partially applied policy.
 - Expected-ID attach/detach refuses concurrent/unrelated program replacement;
   the emergency detach command is documented separately as an operator override.
+- Handshake/status/login admission commits source, prefix and global tokens only
+  after policy accepts. Rejected sources cannot exhaust wider event budgets, and
+  allow-listed sources do not spend prefix tokens. The pre-state global connect
+  guard remains an incoming-accept work bound.
+- Pinned map access verifies geometry before passing C buffers to the kernel.
+  Controller startup/attachment also checks that all map IDs belong to the pinned
+  program, rejecting mixed generations before policy or attachment changes.
+- Publication and lease failures stop further controller renewal; cleanup still
+  attempts kernel expiry and socket removal if runtime publication fails.
 
 ## Explicit scope decisions
 
