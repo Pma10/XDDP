@@ -151,7 +151,7 @@ async fn handle(mut client:TcpStream,peer:SocketAddr,s:Arc<State>,mut ticket:Tic
         protocol::status_request(request.body())?; s.metrics.inc(6);
         let (p,blocked) = s.runtime.policy(peer.ip());
         if blocked || (!separate_status && !s.limiter.event(&ticket,Event::Status,p)) { ticket.server_rejected = true; return Ok(()); }
-        let response = s.cache.get(&s.metrics);
+        let response = s.cache.get(&s.metrics, h.version);
         timeout(Duration::from_millis(s.cfg.timeouts.status_ms),client.write_all(&response)).await.map_err(|_|Error::Deadline)?.map_err(|_|Error::Io)?;
         // A successful status-only client may close without a ping; do not score it as churn.
         ticket.status_complete = true;
