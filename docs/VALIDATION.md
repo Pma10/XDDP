@@ -6,6 +6,21 @@ by the repository's GitHub Actions using the user's local Git authentication.
 
 ## Recorded runs
 
+- [Upload and false-positive hardening](https://github.com/Pma10/XDDP/actions/runs/34138498680)
+  for commit `b768a19`: **PASS** in both jobs. Twenty-seven Rust tests, sixteen
+  Python controller tests and ten privileged XDP tests passed. Both PROXY v2
+  integration modes include padded VarInt compatibility. Three additional
+  loopback scenarios exercise disabled, monitoring and enforced upload budgets:
+  a large uploader, another same-IP healthy relay, pending-slot caps, slot release
+  and reconnect. Unit coverage includes independent prefix penalties, backend
+  close exemptions, half-close/unlimited download, byte-bucket refill, overflow
+  validation, explicit runtime expiry and oversized policy rejection before mutation.
+  Full-precision policy-generation metrics passed. Installer staging and reinstall
+  preserved operator config contents/permissions; shell syntax and help passed.
+  C ASan/UBSan and native veth PMTU/replacement/detach also passed. State layouts
+  are identity key 17 bytes, entry 232 bytes, ticket 48 bytes.
+  Full apt/rustup installation on an operator host and production attack/PvP
+  capacity tests were not executed; staging does not exercise host package setup.
 - [Status isolation and admission efficiency](https://github.com/Pma10/XDDP/actions/runs/34038734710)
   for commit `6b18ee9`: **PASS** in both jobs. Twenty Rust tests, fourteen
   Python controller tests and ten privileged XDP tests passed. Both PROXY v2
@@ -52,7 +67,7 @@ by the repository's GitHub Actions using the user's local Git authentication.
 
 ## Test surfaces
 
-- Rust: bounded canonical VarInts, signed values, packet/schema validation,
+- Rust: bounded VarInts including padded encodings, signed values, packet/schema validation,
   split/coalesced reads, progress/absolute deadlines, token refill/bursts,
   IPv4-mapped identity/prefix normalization, concurrency cleanup, table saturation,
   churn/status distinction, runtime expiry/allow precedence, PROXY v2 wire layout.

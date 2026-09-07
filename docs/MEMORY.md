@@ -66,8 +66,8 @@ gate/target/release/xddp-gate --state-sizes
 python3 scripts/memory_estimate.py --gate-binary gate/target/release/xddp-gate --cpus 6
 ```
 
-The [Debian CI binary for `7db2ef0`](https://github.com/Pma10/XDDP/actions/runs/34028321516)
-reported key=17 bytes, entry=224 bytes and connection ticket=64 bytes. These are
+The [Debian CI binary for `b768a19`](https://github.com/Pma10/XDDP/actions/runs/34138498680)
+reported key=17 bytes, entry=232 bytes and connection ticket=48 bytes. These are
 Rust `size_of` values, not heap/RSS measurements. Table tuple alignment, allocator
 rounding and hash-table spare capacity still apply; the conservative planning
 table below deliberately retains larger layout assumptions.
