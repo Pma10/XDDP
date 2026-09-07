@@ -77,19 +77,24 @@ static __always_inline int parse_transport(const __u8 *d, const __u8 *end,
     const __u8 *t = d + off;
     if (p->proto == 6) {
         if (t + 20 > end || off + 20 > p->ip_end) return -R_INVALID_TCP;
+        /* Read only fields covered by the fixed header check before doing any
+         * variable-length arithmetic. This keeps the packet range proof
+         * explicit on older 6.1 verifier paths. */
+        p->port = be16(t + 2);
+        p->flags = t[13];
         __u32 len = (t[12] >> 4) * 4;
         if (len < 20 || off + len > p->ip_end || t + len > end)
             return -R_INVALID_TCP;
-        p->port = be16(t + 2);
-        p->flags = t[13];
         if (((p->flags & 2) && (p->flags & 5)) ||
             ((p->flags & 5) == 5)) return -R_INVALID_TCP;
     } else if (p->proto == 17) {
         if (t + 8 > end || off + 8 > p->ip_end) return -R_OTHER;
+        /* Same ordering for UDP: the fixed eight-byte check covers both
+         * length and destination-port reads. */
+        p->port = be16(t + 2);
         __u32 len = be16(t + 4);
         if (len < 8 || off + len > p->ip_end || t + len > end)
             return -R_OTHER;
-        p->port = be16(t + 2);
     }
     return 0;
 }
