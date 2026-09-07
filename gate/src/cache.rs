@@ -93,11 +93,18 @@ pub fn proxy_header(src: SocketAddr, dst: SocketAddr) -> std::io::Result<Vec<u8>
         assert_eq!(proxy_header("[::1]:1".parse().unwrap(),"[::1]:2".parse().unwrap()).unwrap().len(),52);
     }
     #[test] fn status_protocol_matches_client_without_mutating_cached_value() {
-        let value=serde_json::json!({"version":{"name":"ViaVersion","protocol":47},"description":{"text":"ok"}});
+        let value=serde_json::json!({
+            "version":{"name":"ViaVersion","protocol":47},
+            "description":{"text":"<gradient:blue>ok</gradient>","extra":[{"text":"!","color":"gold"}]},
+            "favicon":"data:image/png;base64,fixture"
+        });
         let modern=render(&value,767,32768).unwrap();
         let legacy=render(&value,-1,32768).unwrap();
         assert!(String::from_utf8_lossy(&modern).contains("\"protocol\":767"));
         assert!(String::from_utf8_lossy(&legacy).contains("\"protocol\":47"));
+        assert!(String::from_utf8_lossy(&modern).contains("<gradient:blue>ok</gradient>"));
+        assert!(String::from_utf8_lossy(&modern).contains("\"color\":\"gold\""));
+        assert!(String::from_utf8_lossy(&modern).contains("data:image/png;base64,fixture"));
         assert_eq!(value["version"]["protocol"],47);
     }
 }

@@ -198,15 +198,28 @@ After Login Start, all stream bytes are opaque, including encryption and plugin
 negotiation. A syntactically valid client can still consume an admitted slot;
 use measured login budgets and backend authentication timeouts.
 
-The cache polls one configured host/version. Cached status JSON is bounded and,
-when it contains a `version.protocol` field, the gate rewrites that field to the
-requesting status handshake protocol. This keeps ViaVersion-compatible clients
-from seeing a false red-X protocol mismatch while sharing one MOTD/player cache.
-Protocol -1 discovery preserves the backend value. Multi-host MOTDs or status
-responses whose compatibility depends on more than the protocol field need
-separate gate instances/configurations. Cache TTL expiry uses configured fallback
-JSON rather than unbounded stale data or client-triggered refresh. The refresh
-timeout, response limit and JSON recursion bound apply.
+The cache polls one configured virtual host/port/version. `cache.host` and
+`cache.port` are the hostname and public port sent inside the backend status
+handshake; they should match the address players use when a proxy selects MOTDs
+by host/port. They are not the gate's backend socket address/port (`backend`).
+For a public gate on `:25565` forwarding to a Java/Velocity listener on
+`:25566`, `cache.port` normally remains `25565`. `cache.protocol` is the
+canonical client protocol used for that one poll. For ViaVersion or
+MiniMessage/component MOTDs,
+use the current modern protocol used by the public server (for example `774`
+for a 1.21.11 endpoint), rather than the legacy `47` protocol. A legacy poll
+can make the proxy serialize a reduced 1.8-compatible description before XDDP
+ever sees it, and no response-side rewrite can restore those lost components.
+
+Cached status JSON is bounded and, when it contains a `version.protocol` field,
+the gate rewrites that field to the requesting status handshake protocol. This
+keeps ViaVersion-compatible clients from seeing a false red-X protocol mismatch
+while sharing one canonical MOTD/player cache. Protocol -1 discovery preserves
+the backend value. Multi-host MOTDs or status responses whose compatibility
+depends on more than the protocol field need separate gate instances/configurations.
+Cache TTL expiry uses configured fallback JSON rather than unbounded stale data or
+client-triggered refresh. The refresh timeout, response limit and JSON recursion
+bound apply.
 
 ## Metrics
 
