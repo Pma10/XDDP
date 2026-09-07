@@ -73,7 +73,10 @@ static __always_inline int parse_transport(const __u8 *d, const __u8 *end,
 {
     if (p->fragment || p->deferred) return 1;
     __u32 off = p->l4;
-    if (off > 65535 || off > p->ip_end) return -R_OTHER;
+    /* parse_ip accepts at most two VLAN tags, IPv4 IHL <= 60 and a fixed
+     * IPv6 base header. Keep the derived L4 offset explicitly small so the
+     * 6.1 verifier can relate the variable packet pointer to data_end. */
+    if (off > 128 || off > p->ip_end) return -R_OTHER;
     const __u8 *t = d + off;
     if (p->proto == 6) {
         if (t + 20 > end || off + 20 > p->ip_end) return -R_INVALID_TCP;
