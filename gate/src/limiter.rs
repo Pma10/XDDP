@@ -12,9 +12,9 @@ pub struct Policy { pub mode: usize, pub observe: bool, pub exempt: bool }
 struct Bucket { tokens: f64, last: Instant, rate: Rate }
 impl Bucket {
     fn new(rate: Rate, now: Instant) -> Self { Self { tokens: rate.burst, last: now, rate } }
-    fn available(&mut self, now: Instant, factor: f64) -> bool {
+    fn available(&mut self, now: Instant, factor: f64, preserve_burst: bool) -> bool {
         if self.rate.per_second == 0.0 { return true; }
-        let cap = (self.rate.burst * factor).max(1.0);
+        let cap = (self.rate.burst * if preserve_burst {1.0} else {factor}).max(1.0);
         self.tokens = (self.tokens + now.saturating_duration_since(self.last).as_secs_f64() * self.rate.per_second * factor).min(cap);
         self.last = self.last.max(now);
         self.tokens >= 1.0
@@ -22,17 +22,17 @@ impl Bucket {
     fn consume(&mut self) {
         if self.rate.per_second > 0.0 { self.tokens -= 1.0; }
     }
-    fn take(&mut self, now: Instant, factor: f64) -> bool {
-        if !self.available(now, factor) { return false; }
+    fn take(&mut self, now: Instant, factor: f64, preserve_burst: bool) -> bool {
+        if !self.available(now, factor, preserve_burst) { return false; }
         self.consume(); true
     }
 }
 struct Entry {
-    active: usize, pending: usize, touched: Instant, buckets: [Bucket;4],
+    active: usize, pending: usize, status: usize, touched: Instant, buckets: [Bucket;4],
     score: f64, score_at: Instant, penalty_until: Instant,
 }
 impl Entry {
-    fn new(r: &Rates, now: Instant) -> Self { Self { active: 0, pending: 0, touched: now,
+    fn new(r: &Rates, now: Instant) -> Self { Self { active: 0, pending: 0, status: 0, touched: now,
         buckets: r.list().map(|x| Bucket::new(x, now)), score: 0.0,
         score_at: now, penalty_until: now } }
     fn decay(&mut self, now: Instant, half_life: u64) {
@@ -57,8 +57,21 @@ fn subnet(ip: IpAddr, v4: u8, v6: u8) -> IpAddr {
     }
 }
 pub struct Ticket { limiter: Arc<Limiter>, ip: IpAddr, prefix: IpAddr,
-    pub handshake: bool, pub admitted: bool, pub status_complete: bool, pub server_rejected: bool }
+    pub handshake: bool, pub admitted: bool, pub status_complete: bool, pub server_rejected: bool,
+    status: bool }
 impl Ticket {
+    pub fn enter_status(&mut self) -> bool {
+        if self.status { return true; }
+        let table=&self.limiter.ip;
+        let mut map=table.shards[table.shard(self.ip)].lock().unwrap();
+        let Some(e)=map.get_mut(&self.ip) else { return false; };
+        if self.limiter.cfg.status_ip > 0 && e.status >= self.limiter.cfg.status_ip {
+            self.server_rejected=true;
+            self.limiter.metrics.inc(20); self.limiter.metrics.inc(44);
+            return false;
+        }
+        e.status+=1; self.status=true; true
+    }
     pub fn mark_admitted(&mut self) {
         if self.admitted { return; }
         for (table,key) in [(&self.limiter.ip,self.ip),(&self.limiter.prefix,self.prefix)] {
@@ -84,11 +97,12 @@ impl Drop for Ticket {
             let mut map = table.shards[table.shard(key)].lock().unwrap();
             if let Some(e) = map.get_mut(&key) {
                 e.active -= 1; e.touched = now;
+                if self.status && std::ptr::eq(table, &self.limiter.ip) { e.status -= 1; }
                 if !self.admitted { e.pending -= 1; }
-                if churn {
+                if churn && threshold > 0.0 {
                     e.decay(now, self.limiter.cfg.churn_half_life_seconds);
                     e.score = (e.score + if self.handshake {0.25} else {1.0}).min(1e6);
-                    if threshold > 0.0 && e.score >= threshold {
+                    if e.score >= threshold {
                         e.penalty_until = now + Duration::from_secs(self.limiter.cfg.penalty_seconds);
                     }
                 }
@@ -107,7 +121,7 @@ impl Limiter {
         if p.observe { self.metrics.inc(27); true } else { self.metrics.inc(reason); false }
     }
     pub fn global(&self, event: Event, p: Policy) -> bool {
-        let allowed = self.global.lock().unwrap()[event as usize].take(Instant::now(), self.cfg.mode_multipliers[p.mode]);
+        let allowed = self.global.lock().unwrap()[event as usize].take(Instant::now(), self.cfg.mode_multipliers[p.mode], self.cfg.preserve_burst);
         self.judged(allowed, 16, Policy { exempt: false, ..p })
     }
     pub fn accept(self: &Arc<Self>, ip: IpAddr, p: Policy) -> Option<Ticket> {
@@ -131,8 +145,8 @@ impl Limiter {
             self.metrics.inc(20); self.metrics.inc(38); return None;
         }
         let factor = self.cfg.mode_multipliers[p.mode];
-        let ip_ok = i.buckets[0].available(now, factor) && now >= i.penalty_until;
-        let prefix_ok = net.buckets[0].available(now, factor) && now >= net.penalty_until;
+        let ip_ok = i.buckets[0].available(now, factor, self.cfg.preserve_burst) && now >= i.penalty_until;
+        let prefix_ok = net.buckets[0].available(now, factor, self.cfg.preserve_burst) && now >= net.penalty_until;
         if !self.judged(ip_ok, 14, p) || !self.judged(prefix_ok, 15, p) { return None; }
         if !p.exempt {
             if ip_ok { i.buckets[0].consume(); }
@@ -140,7 +154,7 @@ impl Limiter {
         }
         i.active += 1; net.active += 1; i.pending += 1; net.pending += 1;
         Some(Ticket { limiter: self.clone(), ip, prefix, handshake: false, admitted: false,
-            status_complete: false, server_rejected: false })
+            status_complete: false, server_rejected: false, status: false })
     }
     pub fn event(&self, t: &Ticket, event: Event, p: Policy) -> bool {
         let now = Instant::now(); let factor = self.cfg.mode_multipliers[p.mode];
@@ -152,12 +166,12 @@ impl Limiter {
         let (Some(ip), Some(prefix)) = (ips.get_mut(&t.ip), prefixes.get_mut(&t.prefix)) else { return false; };
         ip.touched = now; prefix.touched = now;
         let index = event as usize;
-        let ip_ok = ip.buckets[index].available(now, factor) && now >= ip.penalty_until;
+        let ip_ok = ip.buckets[index].available(now, factor, self.cfg.preserve_burst) && now >= ip.penalty_until;
         if !self.judged(ip_ok, 14, p) { return false; }
-        let prefix_ok = prefix.buckets[index].available(now, factor) && now >= prefix.penalty_until;
+        let prefix_ok = prefix.buckets[index].available(now, factor, self.cfg.preserve_burst) && now >= prefix.penalty_until;
         if !self.judged(prefix_ok, 15, p) { return false; }
         let mut global = self.global.lock().unwrap();
-        let global_ok = global[index].available(now, factor);
+        let global_ok = global[index].available(now, factor, self.cfg.preserve_burst);
         if !self.judged(global_ok, 16, Policy { exempt:false, ..p }) { return false; }
         if !p.exempt {
             if ip_ok { ip.buckets[index].consume(); }
@@ -185,16 +199,30 @@ mod tests {
     #[test] fn bursts_refill_and_clock_safety() {
         let now = Instant::now();
         let mut b = Bucket::new(Rate { per_second: 2.0, burst: 3.0 }, now);
-        for _ in 0..3 { assert!(b.take(now, 1.0)); }
-        assert!(!b.take(now, 1.0));
-        assert!(b.take(now + Duration::from_millis(500), 1.0));
-        assert!(!b.take(now, 1.0));
-        assert!(!b.take(now + Duration::from_millis(500), 1.0));
+        for _ in 0..3 { assert!(b.take(now, 1.0, false)); }
+        assert!(!b.take(now, 1.0, false));
+        assert!(b.take(now + Duration::from_millis(500), 1.0, false));
+        assert!(!b.take(now, 1.0, false));
+        assert!(!b.take(now + Duration::from_millis(500), 1.0, false));
     }
     #[test] fn prefix_and_mapped_identity() {
         assert_eq!(normalize("::ffff:192.0.2.4".parse().unwrap()), "192.0.2.4".parse::<IpAddr>().unwrap());
         assert_eq!(subnet("192.0.2.4".parse().unwrap(),24,64), "192.0.2.0".parse::<IpAddr>().unwrap());
         assert_eq!(subnet("2001:db8::1234".parse().unwrap(),24,64), "2001:db8::".parse::<IpAddr>().unwrap());
+    }
+    #[test] fn preserved_burst_survives_escalation_without_refilling_on_mode_changes() {
+        let now=Instant::now();
+        let rate=Rate {per_second:10.0,burst:4.0};
+        let mut b=Bucket::new(rate,now);
+        assert!(b.take(now,1.0,true));
+        for _ in 0..3 { assert!(b.take(now,0.1,true)); }
+        assert!(!b.take(now,1.0,true));
+        assert!(!b.take(now+Duration::from_millis(999),0.1,true));
+        assert!(b.take(now+Duration::from_secs(1),0.1,true));
+        assert!(!b.take(now,0.1,true));
+        let mut legacy=Bucket::new(rate,now);
+        assert!(legacy.take(now,0.1,false));
+        assert!(!legacy.take(now,0.1,false));
     }
     fn config() -> Limits {
         let c: crate::config::Config = serde_json::from_str(include_str!("../../config/gate.json")).unwrap();
@@ -267,6 +295,32 @@ mod tests {
         let mut c=l.accept("192.0.2.3".parse().unwrap(),p).unwrap();
         b.server_rejected=true; c.server_rejected=true; drop(b); drop(c); drop(relay);
         assert_eq!(l.prefix.shards[l.prefix.shard("192.0.2.0".parse().unwrap())].lock().unwrap()[&"192.0.2.0".parse::<IpAddr>().unwrap()].pending,0);
+    }
+    #[test] fn status_cap_is_per_ip_idempotent_and_releases_without_churn() {
+        let mut cfg=config(); cfg.status_ip=1; cfg.churn_score_threshold=0.1;
+        let m=Arc::new(Metrics::new()); let l=Limiter::new(cfg,m.clone());
+        let p=Policy {mode:0,observe:false,exempt:false};
+        let mut first=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
+        assert!(first.enter_status()); assert!(first.enter_status());
+        let mut rejected=l.accept(first.ip,p).unwrap();
+        assert!(!rejected.enter_status()); drop(rejected);
+        assert_eq!(m.get(44),1); assert_eq!(m.get(22),0);
+        let mut other=l.accept("192.0.2.2".parse().unwrap(),p).unwrap();
+        assert!(other.enter_status()); other.status_complete=true;
+        let mut login=l.accept(first.ip,p).unwrap();
+        login.mark_admitted();
+        first.status_complete=true; drop(first);
+        let mut replacement=l.accept(login.ip,Policy {observe:true,exempt:true,..p}).unwrap();
+        assert!(replacement.enter_status()); replacement.status_complete=true;
+        let mut exempt=l.accept(login.ip,Policy {observe:true,exempt:true,..p}).unwrap();
+        assert!(!exempt.enter_status()); drop(exempt);
+        drop(replacement); drop(login); drop(other);
+        assert_eq!(m.get(22),0);
+        for shard in &l.ip.shards {
+            for entry in shard.lock().unwrap().values() {
+                assert_eq!((entry.active,entry.pending,entry.status),(0,0,0));
+            }
+        }
     }
     #[test] fn ip_penalty_does_not_implicitly_penalize_shared_prefix() {
         let mut cfg=config(); cfg.churn_score_threshold=0.1; cfg.churn_prefix_score_threshold=0.0;

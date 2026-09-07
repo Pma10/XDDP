@@ -131,19 +131,26 @@ async fn handle(mut client:TcpStream,peer:SocketAddr,s:Arc<State>,mut ticket:Tic
     let h = protocol::handshake(handshake.body(),&s.cfg.protocol)?;
     ticket.handshake = true; s.metrics.inc(4);
     let (p,blocked) = s.runtime.policy(peer.ip());
-    if blocked || !s.limiter.event(&ticket,Event::Handshake,p) { ticket.server_rejected = true; return Ok(()); }
+    // Opt-in separation prevents status refreshes spending login handshake tokens.
+    // Status is charged at its handshake so withholding the request cannot bypass it.
+    let separate_status = h.state == 1 && s.cfg.limits.separate_status_budget;
+    let event = if separate_status { Event::Status } else { Event::Handshake };
+    if blocked { ticket.server_rejected = true; return Ok(()); }
     if h.state == 1 {
+        if !ticket.enter_status() { return Ok(()); }
         // Status sessions remain inside prelogin's total cap, but cannot occupy
         // all its slots when an operator enables a smaller status cap.
         let Ok(_status) = s.status.clone().try_acquire_owned() else {
             s.metrics.inc(20); s.metrics.inc(37); ticket.server_rejected = true; return Ok(());
         };
+        // A source/global capacity rejection must not consume shared rate tokens.
+        if !s.limiter.event(&ticket,event,p) { ticket.server_rejected = true; return Ok(()); }
         let _status_gauge = Gauge::new(s.metrics.clone(),36);
         drop(handshake);
         let request = phase(&mut client,&s,&mut left,s.cfg.timeouts.status_ms,5).await?;
         protocol::status_request(request.body())?; s.metrics.inc(6);
         let (p,blocked) = s.runtime.policy(peer.ip());
-        if blocked || !s.limiter.event(&ticket,Event::Status,p) { ticket.server_rejected = true; return Ok(()); }
+        if blocked || (!separate_status && !s.limiter.event(&ticket,Event::Status,p)) { ticket.server_rejected = true; return Ok(()); }
         let response = s.cache.get(&s.metrics);
         timeout(Duration::from_millis(s.cfg.timeouts.status_ms),client.write_all(&response)).await.map_err(|_|Error::Deadline)?.map_err(|_|Error::Io)?;
         // A successful status-only client may close without a ping; do not score it as churn.
@@ -153,7 +160,16 @@ async fn handle(mut client:TcpStream,peer:SocketAddr,s:Arc<State>,mut ticket:Tic
         timeout(Duration::from_millis(s.cfg.timeouts.status_ms),client.write_all(&ping.wire)).await.map_err(|_|Error::Deadline)?.map_err(|_|Error::Io)?;
         return Ok(());
     }
-    let login = phase(&mut client,&s,&mut left,s.cfg.timeouts.login_ms,protocol::login_max(h.version,&s.cfg.protocol)?).await?;
+    if !s.limiter.event(&ticket,Event::Handshake,p) { ticket.server_rejected = true; return Ok(()); }
+    let login_max = match protocol::login_max(h.version,&s.cfg.protocol) {
+        Ok(max) => max,
+        Err(e) => {
+            // An unmapped client version is a compatibility rejection, not churn.
+            ticket.server_rejected = true;
+            return Err(e);
+        }
+    };
+    let login = phase(&mut client,&s,&mut left,s.cfg.timeouts.login_ms,login_max).await?;
     protocol::login(login.body(),h.version,&s.cfg.protocol)?; s.metrics.inc(7);
     let (p,blocked) = s.runtime.policy(peer.ip());
     if blocked || (!p.observe && p.mode == 3) || !s.limiter.event(&ticket,Event::Login,p) {

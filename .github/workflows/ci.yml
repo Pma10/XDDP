@@ -19,6 +19,7 @@ jobs:
           python3 tests/gate_integration.py --binary gate/target/release/xddp-gate
           python3 tests/gate_integration.py --binary gate/target/release/xddp-gate --proxy-v2
           python3 tests/gate_abuse_integration.py --binary gate/target/release/xddp-gate
+          python3 tests/gate_fairness_integration.py --binary gate/target/release/xddp-gate
       - name: Script syntax
         run: |
           for file in scripts/*.sh scripts/ddosctl; do sh -n "$file"; done

@@ -62,6 +62,7 @@ make test
 python3 tests/gate_integration.py --binary gate/target/release/xddp-gate
 python3 tests/gate_integration.py --binary gate/target/release/xddp-gate --proxy-v2
 python3 tests/gate_abuse_integration.py --binary gate/target/release/xddp-gate
+python3 tests/gate_fairness_integration.py --binary gate/target/release/xddp-gate
 echo '[4/5] Preparing bpffs (no XDP attachment)'
 if ! mountpoint -q /sys/fs/bpf; then
     mount -t bpf bpf /sys/fs/bpf

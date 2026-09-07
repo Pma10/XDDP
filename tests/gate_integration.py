@@ -105,6 +105,7 @@ async def run(binary,proxy_v2=False):
     cfg.update(listen=f"127.0.0.1:{public}",backend=f"127.0.0.1:{backend_port}",metrics=f"127.0.0.1:{metric}",runtime_file="")
     cfg.update(proxy_v2=proxy_v2,allow_backend_identity_loss=not proxy_v2)
     cfg["limits"].update(total_sockets=64,prelogin=8,status_connections=2,admitted=16,backend=17,ip_entries=128,prefix_entries=128)
+    cfg["limits"]["separate_status_budget"] = False # Retain legacy configuration coverage.
     cfg["timeouts"].update(first_progress_ms=200,progress_ms=1000,handshake_ms=1500,login_ms=500,status_ms=1500,shutdown_seconds=1)
     cfg["cache"]["ttl_seconds"] = 300
     logins = 0

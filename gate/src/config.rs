@@ -27,6 +27,21 @@ pub struct Rate {
         c.limits.prelogin_ip=c.limits.prelogin+1; assert!(c.validate().is_err());
         c.limits.prelogin_ip=0; c.limits.admitted=usize::MAX; assert!(c.validate().is_err());
     }
+    #[test] fn status_fairness_is_backward_compatible_and_bounded() {
+        let mut raw:serde_json::Value=serde_json::from_str(include_str!("../../config/gate.json")).unwrap();
+        for key in ["status_ip","separate_status_budget","preserve_burst"] {
+            raw["limits"].as_object_mut().unwrap().remove(key);
+        }
+        let mut c:Config=serde_json::from_value(raw).unwrap();
+        assert_eq!(c.limits.status_ip,0);
+        assert!(!c.limits.separate_status_budget); assert!(!c.limits.preserve_burst);
+        assert!(c.validate().is_ok());
+        c.limits.status_ip=c.limits.status_connections; assert!(c.validate().is_ok());
+        c.limits.status_ip+=1; assert!(c.validate().is_err());
+        c.limits.status_connections=0; c.limits.status_ip=c.limits.prelogin;
+        assert!(c.validate().is_ok());
+        c.limits.status_ip+=1; assert!(c.validate().is_err());
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -48,6 +63,12 @@ pub struct Limits {
     pub prelogin: usize,
     #[serde(default)]
     pub status_connections: usize,
+    #[serde(default)]
+    pub status_ip: usize,
+    #[serde(default)]
+    pub separate_status_budget: bool,
+    #[serde(default)]
+    pub preserve_burst: bool,
     pub admitted: usize,
     pub backend: usize,
     pub connections_ip: usize,
@@ -167,6 +188,7 @@ impl Config {
         }
         if l.total_sockets < 4 || l.total_sockets > 100000 || l.prelogin == 0 ||
             l.status_connections > l.prelogin ||
+            l.status_ip > if l.status_connections == 0 { l.prelogin } else { l.status_connections } ||
             l.prelogin_ip > l.prelogin || l.prelogin_prefix > l.prelogin ||
             l.prelogin > l.total_sockets || l.admitted > l.total_sockets || l.backend > l.total_sockets ||
             l.admitted == 0 || l.backend < 2 || l.prelogin + l.admitted + l.backend > l.total_sockets ||

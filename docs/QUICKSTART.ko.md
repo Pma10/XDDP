@@ -56,6 +56,12 @@ sudo ddosctl xdp attach
 
 `observe=true`를 유지한 채 지표를 관찰합니다. 제한값과 `status_connections`는 정상 접속·브라우저 상태 조회·BotSentry 검증량을 측정한 뒤 조정합니다. `observe off`는 별도 유지보수 판단으로 실행합니다.
 
+샘플은 상태 조회를 로그인 핸드셰이크 예산과 분리하고
+(`separate_status_budget=true`), 공격 모드에서도 짧은 정상 접속 burst를
+보존합니다(`preserve_burst=true`). `status_ip`는 기본 0(비활성)이며 공유
+NAT의 실제 상태 조회 동시량을 확인한 뒤에만 설정합니다. 속도와 burst 값은
+실측값으로 정하고, 샘플의 0 값은 제한이 꺼진 상태입니다.
+
 ## 업그레이드와 제거
 
 소스 디렉터리에서 다시 `sudo sh scripts/setup.sh`를 실행하면 새 파일을 빌드하고 기존 설정을 보존합니다. 실행 중 서비스가 있으면 먼저 정비 시간에 다음을 실행합니다.

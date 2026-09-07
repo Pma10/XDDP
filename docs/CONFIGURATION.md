@@ -70,6 +70,18 @@ waiting in a queue or accruing churn. Monitor `active_status` and
 This does not reserve bandwidth or global connect/handshake tokens, and clients
 that have not supplied a valid handshake still share the initial prelogin cap.
 
+`status_ip` optionally caps status handshakes from one source IP. It is zero by
+default and cannot exceed the effective status capacity. A source rejection is
+closed immediately and does not consume the global status bucket. With
+`separate_status_budget=true`, the status handshake is charged once before the
+request body, so withholding that body cannot bypass the status limit. The
+sample enables this separation.
+
+`preserve_burst=true` keeps the configured burst size during an elevated mode
+while still scaling refill speed. This preserves a short legitimate shared-NAT
+join burst after escalation without relaxing the sustained rate. It has no
+effect while all rate buckets are disabled.
+
 `prelogin_ip` and `prelogin_prefix` separately cap incomplete connections per
 identity. Zero disables the respective cap; nonzero values must be <= `prelogin`.
 Admission frees these pending counts while retaining total connection counts.
