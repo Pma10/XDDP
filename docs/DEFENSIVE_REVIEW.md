@@ -18,14 +18,15 @@ separate acceptance gates.
 | Malformed headers | Bounded Ethernet/two-VLAN/IP/TCP/UDP parsing, correct IP-declared bounds | IP/TCP checksums and TCP option semantics delegated to Linux |
 | Tiny packets/repeated size/PSH | Never used as independent drop criteria | Valid-looking tiny traffic still costs kernel processing |
 | TCP option abuse | Header extent/data-offset validation before kernel | No hand-written TCP option negotiation or stream state in XDP |
-| Connection churn | Decaying IP/prefix scores for incomplete and short admitted connections; temporary penalties | Penalties disabled until measured; successful status clients exempt |
+| Connection churn | Decaying IP/prefix scores for incomplete admissions; independently enabled temporary penalties | Successful status, server rejection and all admitted relays exempt to avoid backend/BotSentry false positives |
 | Slowloris | First-progress, read-progress and absolute per-phase deadlines | Valid Login Start reaches opaque relay; backend must time out incomplete authentication |
 | FD exhaustion | Total/prelogin/admitted/backend semaphores, fixed metrics cap, explicit systemd FD ceiling | Kernel/system descriptors need headroom; caps cause intentional new-client refusal |
 | Memory exhaustion | Validate frame length before allocation, bounded initial bytes/cache/table/task/relay count | Kernel socket autotuning and Java memory are additional; measure RSS/socket memory |
 | Status floods | Separate IP/prefix/global status budget; one timer-driven cache poll | Cache is single-host/version; status clients occupy bounded prelogin slots until close/deadline |
 | Login floods | Complete handshake/Login Start first; distinct scope/global login budget and backend cap | Syntactically valid logins are not authenticated players |
 | Malformed Minecraft | Strict frame/VarInt/UTF-8/state/structure/trailing-byte checks | Signatures, auth, compression/encryption and later protocol belong to backend |
-| Partial/overlong VarInt | Up to five bytes, overflow/noncanonical forms rejected, exact bounded reads | Deliberately strict encoding may reject nonconforming custom clients |
+| Partial/overlong VarInt | Frame length <=3 bytes, fields <=5, bounded padded encodings accepted; overflow/nontermination rejected | Frame/schema/total-byte bounds still apply |
+| Single large uploader | Optional connection-local upload byte budget; monitor before enforcement; excess connection closes | Disabled by default; no NIC PPS/receive-link protection, no aggregate bot classification |
 | Huge declared lengths | Phase/schema bounds before heap allocation; total wire budget across phases; one wire buffer | Accepted bounded frames and kernel receive queues still consume memory |
 | Backend exhaustion | No per-player backend before admission, finite connect/write deadline, backend semaphore | Existing admitted sockets can persist; backend auth/idle controls remain necessary |
 | Log I/O DoS | Fixed counters, no per-packet/client rejection logs | Startup/fatal service failures still log and have restart backoff |
@@ -42,8 +43,8 @@ separate acceptance gates.
 
 - XDP per-CPU rate arithmetic rounds token time upward to avoid exceeding the
   configured rate through integer division at high rates.
-- Short admitted-login closures also accrue churn; valid completed status is
-  exempt. Score decisions alone never create permanent bans.
+- Short admitted-login closures no longer accrue churn because backend/BotSentry
+  closes cannot identify client fault. Prefix penalties require separate opt-in.
 - Gate runtime policy requires fresh changing generations and both wall/monotonic
   expiry; a stale file cannot indefinitely preserve EMERGENCY or manual blocks.
 - Accepted resources are owned by RAII permits/tickets/gauges. Early return,
@@ -72,6 +73,11 @@ separate acceptance gates.
   source/prefix churn penalties. Resource accounting is still released normally.
 - Initial frames use one allocation and phase/schema length bounds before body
   reads. Valid status/login flows need no artificial delay or challenge exchange.
+- Incomplete source connection counts are separate from existing relays and are
+  released on admission/close. A held initial handshake cannot consume unlimited
+  source slots when the operator enables this cap.
+- Serialized policy/config sizes are validated before state changes. Gate policy
+  generations and rejected reads are observable, including explicit expiry.
 
 ## Explicit scope decisions
 

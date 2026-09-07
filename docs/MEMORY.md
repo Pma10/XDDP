@@ -52,7 +52,7 @@ not just two active RX paths, determine PERCPU value duplication.
 
 ## Actual gate state
 
-Each IP and prefix entry stores active count, last activity, four token buckets,
+Each IP and prefix entry stores active and pending counts, last activity, four token buckets,
 decaying churn score, score time and penalty deadline. Each accepted client owns
 one RAII ticket accounting for both scopes until connection closure. After
 admission no per-packet table access occurs. Randomized hashing distributes
@@ -95,6 +95,8 @@ Status slots are a subset of prelogin slots, not an additional socket pool.
 Relay buffers are 8 KiB per direction: approximately 64 MiB at 4,096 admitted
 clients. Cache is one bounded response plus bounded parsing/fallback buffers.
 Application memory remains bounded, but these values exclude kernel TCP buffers.
+The optional upload guard uses a fixed-size per-connection token bucket and shares
+the existing relay buffers. It creates no queue, per-packet allocation or IP map.
 
 The configured 10,000 socket budget is independent of systemd's 524,288 FD ceiling.
 Admission/default backend/prelogin caps jointly stay below the budget. Leave

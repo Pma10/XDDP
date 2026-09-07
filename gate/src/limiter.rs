@@ -28,11 +28,11 @@ impl Bucket {
     }
 }
 struct Entry {
-    active: usize, touched: Instant, buckets: [Bucket;4],
+    active: usize, pending: usize, touched: Instant, buckets: [Bucket;4],
     score: f64, score_at: Instant, penalty_until: Instant,
 }
 impl Entry {
-    fn new(r: &Rates, now: Instant) -> Self { Self { active: 0, touched: now,
+    fn new(r: &Rates, now: Instant) -> Self { Self { active: 0, pending: 0, touched: now,
         buckets: r.list().map(|x| Bucket::new(x, now)), score: 0.0,
         score_at: now, penalty_until: now } }
     fn decay(&mut self, now: Instant, half_life: u64) {
@@ -56,26 +56,38 @@ fn subnet(ip: IpAddr, v4: u8, v6: u8) -> IpAddr {
         IpAddr::V6(v) => IpAddr::V6(Ipv6Addr::from(u128::from(v) & if v6 == 0 {0} else {u128::MAX << (128-v6)})),
     }
 }
-pub struct Ticket { limiter: Arc<Limiter>, ip: IpAddr, prefix: IpAddr, started: Instant,
+pub struct Ticket { limiter: Arc<Limiter>, ip: IpAddr, prefix: IpAddr,
     pub handshake: bool, pub admitted: bool, pub status_complete: bool, pub server_rejected: bool }
+impl Ticket {
+    pub fn mark_admitted(&mut self) {
+        if self.admitted { return; }
+        for (table,key) in [(&self.limiter.ip,self.ip),(&self.limiter.prefix,self.prefix)] {
+            let mut map=table.shards[table.shard(key)].lock().unwrap();
+            if let Some(e)=map.get_mut(&key) { e.pending-=1; }
+        }
+        self.admitted=true;
+    }
+}
 pub fn state_sizes() -> (usize,usize,usize) {
     (std::mem::size_of::<IpAddr>(),std::mem::size_of::<Entry>(),std::mem::size_of::<Ticket>())
 }
 impl Drop for Ticket {
     fn drop(&mut self) {
         let now = Instant::now();
-        let churn = !self.server_rejected && !self.status_complete &&
-            (!self.admitted || self.started.elapsed() < Duration::from_secs(self.limiter.cfg.churn_window_seconds));
+        // Once relaying, a short close could be backend/BotSentry policy. Do not
+        // infer client fault from an opaque stream's lifetime or EOF direction.
+        let churn = !self.server_rejected && !self.status_complete && !self.admitted;
         if churn { self.limiter.metrics.inc(22); }
         if !self.handshake { self.limiter.metrics.inc(13); }
-        for (table, key) in [(&self.limiter.ip, self.ip), (&self.limiter.prefix, self.prefix)] {
+        for (table, key, threshold) in [(&self.limiter.ip, self.ip, self.limiter.cfg.churn_score_threshold),
+            (&self.limiter.prefix, self.prefix, self.limiter.cfg.churn_prefix_score_threshold)] {
             let mut map = table.shards[table.shard(key)].lock().unwrap();
             if let Some(e) = map.get_mut(&key) {
                 e.active -= 1; e.touched = now;
+                if !self.admitted { e.pending -= 1; }
                 if churn {
                     e.decay(now, self.limiter.cfg.churn_half_life_seconds);
                     e.score = (e.score + if self.handshake {0.25} else {1.0}).min(1e6);
-                    let threshold = self.limiter.cfg.churn_score_threshold;
                     if threshold > 0.0 && e.score >= threshold {
                         e.penalty_until = now + Duration::from_secs(self.limiter.cfg.penalty_seconds);
                     }
@@ -114,6 +126,10 @@ impl Limiter {
            (self.cfg.connections_prefix > 0 && net.active >= self.cfg.connections_prefix) {
             self.metrics.inc(20); return None;
         }
+        if (self.cfg.prelogin_ip > 0 && i.pending >= self.cfg.prelogin_ip) ||
+            (self.cfg.prelogin_prefix > 0 && net.pending >= self.cfg.prelogin_prefix) {
+            self.metrics.inc(20); self.metrics.inc(38); return None;
+        }
         let factor = self.cfg.mode_multipliers[p.mode];
         let ip_ok = i.buckets[0].available(now, factor) && now >= i.penalty_until;
         let prefix_ok = net.buckets[0].available(now, factor) && now >= net.penalty_until;
@@ -122,8 +138,8 @@ impl Limiter {
             if ip_ok { i.buckets[0].consume(); }
             if prefix_ok { net.buckets[0].consume(); }
         }
-        i.active += 1; net.active += 1;
-        Some(Ticket { limiter: self.clone(), ip, prefix, started: now, handshake: false, admitted: false,
+        i.active += 1; net.active += 1; i.pending += 1; net.pending += 1;
+        Some(Ticket { limiter: self.clone(), ip, prefix, handshake: false, admitted: false,
             status_complete: false, server_rejected: false })
     }
     pub fn event(&self, t: &Ticket, event: Event, p: Policy) -> bool {
@@ -214,13 +230,15 @@ mod tests {
         l.sweep(shard); assert_eq!(l.ip.shards[shard].lock().unwrap().len(),1);
         drop(ticket);
     }
-    #[test] fn valid_status_does_not_accrue_churn_but_short_login_does() {
+    #[test] fn valid_status_and_short_backend_closes_do_not_accrue_churn() {
         let m=Arc::new(Metrics::new()); let l=Limiter::new(config(),m.clone());
         let p=Policy {mode:0,observe:true,exempt:false};
         let mut t=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
         t.handshake=true; t.status_complete=true; drop(t); assert_eq!(m.get(22),0);
         let mut t=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
-        t.handshake=true; t.admitted=true; drop(t); assert_eq!(m.get(22),1);
+        t.handshake=true; t.mark_admitted(); drop(t); assert_eq!(m.get(22),0);
+        let mut t=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
+        t.handshake=true; drop(t); assert_eq!(m.get(22),1);
     }
     #[test] fn rejected_ip_cannot_spend_shared_login_tokens() {
         let mut cfg=config();
@@ -234,6 +252,29 @@ mod tests {
         assert!(l.event(&a,Event::Login,p));
         for _ in 0..20 { assert!(!l.event(&a,Event::Login,p)); }
         assert!(l.event(&b,Event::Login,p));
+    }
+    #[test] fn pending_cap_excludes_relays_and_releases_on_drop() {
+        let mut cfg=config(); cfg.prelogin_ip=1; cfg.prelogin_prefix=2;
+        let l=Limiter::new(cfg,Arc::new(Metrics::new()));
+        let p=Policy {mode:0,observe:true,exempt:false};
+        let mut relay=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
+        assert!(l.accept("192.0.2.1".parse().unwrap(),p).is_none());
+        relay.mark_admitted(); relay.mark_admitted();
+        let mut a=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
+        let mut b=l.accept("192.0.2.2".parse().unwrap(),p).unwrap();
+        assert!(l.accept("192.0.2.3".parse().unwrap(),p).is_none());
+        a.server_rejected=true; drop(a);
+        let mut c=l.accept("192.0.2.3".parse().unwrap(),p).unwrap();
+        b.server_rejected=true; c.server_rejected=true; drop(b); drop(c); drop(relay);
+        assert_eq!(l.prefix.shards[l.prefix.shard("192.0.2.0".parse().unwrap())].lock().unwrap()[&"192.0.2.0".parse::<IpAddr>().unwrap()].pending,0);
+    }
+    #[test] fn ip_penalty_does_not_implicitly_penalize_shared_prefix() {
+        let mut cfg=config(); cfg.churn_score_threshold=0.1; cfg.churn_prefix_score_threshold=0.0;
+        let l=Limiter::new(cfg,Arc::new(Metrics::new()));
+        let p=Policy {mode:0,observe:false,exempt:false};
+        drop(l.accept("192.0.2.1".parse().unwrap(),p).unwrap());
+        assert!(l.accept("192.0.2.1".parse().unwrap(),p).is_none());
+        assert!(l.accept("192.0.2.2".parse().unwrap(),p).is_some());
     }
     #[test] fn server_rejection_releases_counts_without_cgnat_penalty() {
         let mut cfg=config(); cfg.churn_score_threshold=0.1;

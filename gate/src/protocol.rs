@@ -14,7 +14,6 @@ pub fn varint(data: &[u8]) -> Result<Option<(i32, usize)>, Error> {
         if i == 4 && b & 0xf0 != 0 { return Err(Error::VarInt); }
         value |= ((b & 0x7f) as u32) << (7 * i);
         if b & 0x80 == 0 {
-            if i > 0 && b == 0 { return Err(Error::VarInt); }
             return Ok(Some((value as i32, i + 1)));
         }
     }
@@ -58,6 +57,9 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R, max: usize,
             len = n as usize;
             break;
         }
+        // Minecraft frame lengths have at most three bytes; field VarInts may
+        // use five. Non-minimal encodings within those bounds are compatible.
+        if used == 3 { return Err(Error::VarInt); }
     }
     if len > max || len > *remaining { return Err(Error::Oversized); }
     *remaining -= len;
@@ -115,7 +117,7 @@ impl<'a> Cursor<'a> {
 pub struct Handshake { pub version: i32, pub state: i32 }
 pub fn handshake_max(cfg: &Protocol) -> usize {
     // ID + version + host length (host cap <=4096) + host + port + state.
-    cfg.max_frame.min(1 + 5 + 2 + cfg.max_host_bytes + 2 + 1)
+    cfg.max_frame.min(5 + 5 + 5 + cfg.max_host_bytes + 2 + 5)
 }
 pub fn handshake(data: &[u8], cfg: &Protocol) -> Result<Handshake, Error> {
     let mut c = Cursor::new(data);
@@ -149,11 +151,11 @@ fn login_schema(version: i32, cfg: &Protocol) -> Result<&str, Error> {
 pub fn login_max(version: i32, cfg: &Protocol) -> Result<usize, Error> {
     // Bounds mirror the accepted schemas, including the full signed-key blobs.
     let extra = match login_schema(version,cfg)? {
-        "legacy" => 0, "signed" => 1+8+2+4096+2+4096,
-        "signed_uuid" => 1+8+2+4096+2+4096+17,
+        "legacy" => 0, "signed" => 1+8+5+4096+5+4096,
+        "signed_uuid" => 1+8+5+4096+5+4096+17,
         "optional_uuid" => 17, "uuid" => 16, _ => return Err(Error::Unsupported),
     };
-    Ok(cfg.max_frame.min(1+1+64+extra))
+    Ok(cfg.max_frame.min(5+5+64+extra))
 }
 pub fn login(data: &[u8], version: i32, cfg: &Protocol) -> Result<(), Error> {
     let schema = login_schema(version,cfg)?;
@@ -202,7 +204,8 @@ mod tests {
             assert_eq!(varint(&b), Ok(Some((n, b.len()))));
             for i in 0..b.len() { assert_eq!(varint(&b[..i]), Ok(None)); }
         }
-        for b in [vec![128, 0], vec![128; 5], vec![255,255,255,255,31]] {
+        assert_eq!(varint(&[128,0]),Ok(Some((0,2))));
+        for b in [vec![128; 5], vec![255,255,255,255,31]] {
             assert_eq!(varint(&b), Err(Error::VarInt));
         }
     }

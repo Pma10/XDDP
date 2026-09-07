@@ -27,8 +27,25 @@ Production thresholds and PvP latency/jitter budgets are **MEASUREMENT REQUIRED*
   churn penalties, global admission controls and four adaptive modes are included.
 - Prometheus, systemd units, controlled attach/replacement/detach, rollback,
   Linux tests and read-only benchmark collection are included.
+- Optional per-source incomplete-connection caps and a per-connection upload
+  budget cover held handshakes and sustained uploads. Upload monitoring precedes
+  explicit enforcement; all new budgets default disabled. See
+  [configuration and scope](docs/CONFIGURATION.md).
 
 ## Build (Debian 12)
+
+### 간편 설치
+
+Debian 12/13 또는 Ubuntu 24.04 systemd 서버에서는 다음 한 명령으로 의존성 설치,
+빌드, 테스트와 파일 설치를 수행할 수 있습니다. 기존 설정은 보존되며 서비스나
+XDP는 자동으로 시작되지 않습니다. 상세 순서는 [간편 설치 안내](docs/QUICKSTART.ko.md)를
+참조하십시오.
+
+```sh
+git clone https://github.com/Pma10/XDDP.git
+cd XDDP
+sudo sh scripts/setup.sh
+```
 
 Install Rust >=1.85 with Cargo through your approved toolchain process, then:
 

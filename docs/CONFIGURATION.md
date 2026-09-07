@@ -70,13 +70,23 @@ waiting in a queue or accruing churn. Monitor `active_status` and
 This does not reserve bandwidth or global connect/handshake tokens, and clients
 that have not supplied a valid handshake still share the initial prelogin cap.
 
-Churn includes pre-admission disconnects and admitted clients closing within
-`churn_window_seconds`. Successful status clients are exempt from churn scoring.
-An incomplete handshake contributes 1, other short incomplete/early sessions
+`prelogin_ip` and `prelogin_prefix` separately cap incomplete connections per
+identity. Zero disables the respective cap; nonzero values must be <= `prelogin`.
+Admission frees these pending counts while retaining total connection counts.
+They apply in observation and to allowed sources, like other resource caps.
+Size shared-NAT limits from legitimate simultaneous joins, not player counts.
+
+Churn includes incomplete pre-admission disconnects. Successful status clients
+and all admitted relays are exempt: a backend/BotSentry close is not evidence of
+client fault. `churn_window_seconds` is retained for old configurations but no
+longer scores short relay lifetimes. An incomplete handshake contributes 1, other incomplete sessions
 0.25; the score decays with the configured half-life. A nonzero threshold gives
 a temporary penalty. All penalty thresholds start disabled. Neither a score
 nor any single behavior permanently blocks an IP or prefix. One IP is not one
 player. Set rates and bursts from measured large NAT joins and reconnects.
+`churn_score_threshold` controls IP penalties. The separate optional
+`churn_prefix_score_threshold` defaults to zero, even with IP penalties enabled;
+a single source should not implicitly activate a shared-NAT penalty.
 Gate-initiated policy/cap rejection and backend connection/write failure before
 relay do not accrue churn: an unavailable server must not penalize retrying
 players or their shared NAT. Malformed or incomplete client input still counts.
@@ -92,12 +102,57 @@ charges available buckets without creating token debt.
 ## Minecraft compatibility
 
 Frame length checks also use the current phase's accepted wire layout before
-allocating or reading the body: status request is one byte, ping is nine bytes,
+allocating or reading the body: status request is up to five bytes, ping up to thirteen bytes,
 handshake is bounded by the configured host limit, and Login Start by its selected
 schema. Signed-key schemas retain their full permitted blob lengths; custom
 version mappings use the same schema bounds. Global frame/initial-byte limits
 still apply. Valid frames keep their original bytes in one buffer, with parsers
 borrowing a body slice; split/coalesced delivery requires no extra client exchange.
+Canonical status/ping bodies remain one/nine bytes. Bounded padded VarInts are
+also accepted, matching compatible protocol decoders: frame length is <=3 bytes,
+field VarInts <=5 bytes. Overflow, nontermination, invalid IDs and trailing bytes
+are still rejected. Schema bounds include padded field lengths.
+
+## Optional per-connection upload budget
+
+`upload` is optional and defaults to `bytes_per_second=0, burst_bytes=0,
+enforce=false`. Zero/zero retains the existing relay implementation. A positive
+rate/burst enables byte accounting and a private token bucket for each relay.
+With `enforce=false`, over-budget connections are counted but forwarded normally.
+With `enforce=true`, the gate discards the chunk exceeding the available budget
+and closes that connection. It neither queues/throttles chunks nor blocks the
+client's IP/prefix. Download traffic is not rate-limited. Half-close is preserved.
+
+This is a static resource policy, independent of adaptive modes, source allow
+lists and the controller's `observe` switch. Start with upload `enforce=false`
+and measured positive values; enabling enforcement requires a controlled gate
+restart. Values are bytes/sec and bytes, both <=1e9. Include legitimate mod/plugin
+uploads, receive batching and scheduling delay when choosing the burst allowance.
+No production upload thresholds are supplied.
+
+The budget starts after validated Login Start reaches the backend, before any
+claim of authentication or BotSentry approval. It counts opaque TCP payload, not
+Minecraft packets or NIC PPS. It cannot prevent receive-link/kernel overload or
+a distributed attack staying below every connection's budget; retain aggregate
+admission/resource limits and upstream mitigation.
+
+`upload_budget_exceeded_connections` counts at most one violation per monitored
+connection. `monitored_upload_bytes` includes bytes read and rejected at the
+guard; `monitored_download_bytes` counts successful writes to the client socket.
+Both byte counters cover monitored relays only and exclude prelogin/cache traffic.
+Budgets use no shared mutex and introduce no extra relay buffer.
+
+## Policy publication checks
+
+The controller verifies that both its saved configuration and runtime document
+fit the gate's 256 KiB limit before modifying maps or leases. The gate reads at
+most limit+1 bytes rather than trusting a prior file-size check. An explicit new
+expired generation takes effect when read; stale unchanged files never renew it.
+`runtime_generation` is the active applied generation, or zero on stale/missing
+policy. `runtime_rejected_reads` counts failed/invalid reads. `ddosctl status`
+exposes the published and last observed gate generation without losing integer
+precision. Normal polling introduces lag; alert on sustained stale/zero values,
+not a momentary difference. Lease expiry still fails to observation by design.
 
 Handshake accepts status nextState=1 and login nextState=2. Zero ports, invalid
 UTF-8, empty/control-character base host, unsupported state and trailing bytes

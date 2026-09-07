@@ -110,6 +110,27 @@ class ControllerIOTests(unittest.TestCase):
             self.assertEqual(len(self.calls),1)
             self.assertEqual(self.calls[0][0],"validate")
 
+    def test_oversized_policy_is_rejected_before_maps_or_persistence(self):
+        cfg=self.controller.cfg
+        cfg["allow_prefixes"]=[f"2001:db8:1234:5678:9abc:def0:1234:{0x1000+i:x}/128" for i in range(3000)]
+        cfg["block_prefixes"]=[f"2001:db8:2345:6789:abcd:ef01:2345:{0x2000+i:x}/128" for i in range(3000)]
+        original=self.config_path.read_text()
+        with self.assertRaisesRegex(ValueError,"256 KiB"):
+            self.controller.command(["mode","attack"])
+        self.assertEqual(self.calls,[])
+        self.assertEqual(self.config_path.read_text(),original)
+        self.assertFalse(self.controller.stopping)
+
+    def test_runtime_generation_metric_keeps_full_integer_precision(self):
+        generation=18446744073709551000
+        with patch("ddosctl.urllib.request.build_opener") as build:
+            build.return_value.open.return_value.__enter__.return_value.read.return_value=(
+                f"xddp_gate_runtime_generation {generation}\nxddp_gate_average_prelogin_duration_seconds 0.1\n").encode()
+            counters=self.controller.gate_counters()
+        self.assertEqual(counters["runtime_generation"],generation)
+        self.assertIsInstance(counters["runtime_generation"],int)
+        self.assertEqual(counters["average_prelogin_duration_seconds"],0.1)
+
 
 if __name__ == "__main__":
     unittest.main()

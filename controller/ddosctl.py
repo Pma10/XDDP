@@ -14,7 +14,7 @@ import sys
 import time
 import urllib.request
 
-from core import Adaptive, MODES, rates, validate
+from core import Adaptive, MODES, rates, validate, bounded_json, runtime_document
 
 
 def atomic(path, data, mode=0o644):
@@ -95,7 +95,7 @@ class Controller:
         for line in data.decode("ascii").splitlines():
             if line.startswith("xddp_gate_"):
                 name, value = line.split()
-                counters[name.removeprefix("xddp_gate_")] = float(value)
+                counters[name.removeprefix("xddp_gate_")] = int(value) if value.isdecimal() else float(value)
         return counters
 
     def tick(self):
@@ -105,6 +105,8 @@ class Controller:
         try:
             current.update(self.gate_counters())
             self.snapshot["gate_metrics_available"] = True
+            self.snapshot["gate_runtime_generation"] = current.get("runtime_generation",0)
+            self.snapshot["gate_runtime_rejected_reads"] = current.get("runtime_rejected_reads",0)
         except (OSError, ValueError, UnicodeError):
             self.snapshot["gate_metrics_available"] = False
         self.signals = rates(self.previous,current,now-self.previous_time)
@@ -127,15 +129,17 @@ class Controller:
 
     def publish(self, expired=False):
         self.generation += 1
-        state = dict(generation=self.generation, expires_unix=int(time.time())+(0 if expired else self.cfg["lease_seconds"]),
-                     mode=self.mode,observe=self.cfg["observe"],allow=self.cfg["allow_prefixes"],
-                     block=sorted(set(self.cfg["block_prefixes"]) | set(self.cfg["bogon_prefixes"])))
-        atomic(self.cfg["runtime_file"],json.dumps(state)+"\n")
+        text = runtime_document(self.cfg,self.generation,
+            int(time.time())+(0 if expired else self.cfg["lease_seconds"]),self.mode)
+        atomic(self.cfg["runtime_file"],text)
 
     def command(self, args):
         if args == ["status"]:
             return dict(mode=MODES[self.mode],observe=self.cfg["observe"],signals=self.signals,
-                        gate_metrics_available=self.snapshot.get("gate_metrics_available",False))
+                        gate_metrics_available=self.snapshot.get("gate_metrics_available",False),
+                        published_generation=self.generation,
+                        gate_runtime_generation=self.snapshot.get("gate_runtime_generation"),
+                        gate_runtime_rejected_reads=self.snapshot.get("gate_runtime_rejected_reads"))
         if args == ["stats"]:
             return self.snapshot
         if args == ["config","show"]:
@@ -180,7 +184,7 @@ class Controller:
                         self.loader("prefix",old["pin_dir"],mapname,"add",n,5)
                 for n in set(c[key])-set(old[key]):
                     self.loader("prefix",old["pin_dir"],mapname,"add",n,reason)
-            atomic(self.path,json.dumps(c,indent=2)+"\n",0o640)
+            atomic(self.path,bounded_json(c,indent=2),0o640)
             self.cfg = c
             self.mode = self.adaptive.mode if c["manual_mode"] == "auto" else MODES.index(c["manual_mode"])
             self.publish()

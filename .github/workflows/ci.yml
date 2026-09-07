@@ -18,10 +18,25 @@ jobs:
         run: |
           python3 tests/gate_integration.py --binary gate/target/release/xddp-gate
           python3 tests/gate_integration.py --binary gate/target/release/xddp-gate --proxy-v2
+          python3 tests/gate_abuse_integration.py --binary gate/target/release/xddp-gate
       - name: Script syntax
         run: |
           for file in scripts/*.sh scripts/ddosctl; do sh -n "$file"; done
           python3 -m compileall -q controller scripts tests
+      - name: Installer staging smoke test
+        run: |
+          stage=$(mktemp -d)
+          DESTDIR="$stage" sh scripts/install.sh
+          test -x "$stage/usr/local/bin/xddp-gate"
+          test -x "$stage/usr/local/libexec/xddp-loader"
+          printf '{"operator_setting":true}\n' > "$stage/etc/xddp/gate.json"
+          chmod 600 "$stage/etc/xddp/gate.json"
+          cp "$stage/etc/xddp/gate.json" "$stage/saved.json"
+          DESTDIR="$stage" sh scripts/install.sh
+          cmp "$stage/saved.json" "$stage/etc/xddp/gate.json"
+          test "$(stat -c %a "$stage/etc/xddp/gate.json")" = 600
+          sh scripts/setup.sh --help
+          if DESTDIR=/ sh scripts/install.sh; then exit 1; fi
       - name: State layout evidence
         run: gate/target/release/xddp-gate --state-sizes
       - uses: actions/upload-artifact@v4

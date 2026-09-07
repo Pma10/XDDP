@@ -1,9 +1,24 @@
 """Pure policy and validation. No network/filesystem side effects."""
 import ipaddress
+import json
 import math
 import urllib.parse
 
 MODES = ("normal", "elevated", "attack", "emergency")
+MAX_DOCUMENT_BYTES = 262144
+
+
+def bounded_json(value, indent=None):
+    text = json.dumps(value, indent=indent) + "\n"
+    if len(text.encode("utf-8")) > MAX_DOCUMENT_BYTES:
+        raise ValueError("serialized policy/config exceeds 256 KiB; reduce prefix lists")
+    return text
+
+
+def runtime_document(cfg, generation, expires_unix, mode):
+    return bounded_json(dict(generation=generation, expires_unix=expires_unix,
+        mode=mode, observe=cfg["observe"], allow=cfg["allow_prefixes"],
+        block=sorted(set(cfg["block_prefixes"]) | set(cfg["bogon_prefixes"]))))
 SIGNALS = {"pps", "bps", "syn_per_second", "accepts_per_second", "handshakes_per_second",
            "status_per_second", "logins_per_second", "churn_per_second", "active_prelogin",
            "new_ip_entries_per_second", "new_prefix_entries_per_second"}
@@ -83,6 +98,9 @@ def validate(cfg):
             positive(bands["exit"], name, 0)
             if bands["exit"] >= bands["enter"]:
                 raise ValueError("exit must be below enter")
+    # Check both writer formats before any map, persistent config or lease change.
+    bounded_json(cfg, indent=2)
+    runtime_document(cfg, (1 << 64)-1, (1 << 64)-1, 3)
     return cfg
 
 

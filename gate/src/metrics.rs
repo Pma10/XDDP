@@ -12,6 +12,8 @@ pub const NAMES: &[&str] = &[
     "observed_rate_limit", "new_ip_entries", "new_prefix_entries", "admitted_clients",
     "backend_connect_attempts", "ip_entries", "prefix_entries", "mode", "observe",
     "active_status", "status_capacity_limited",
+    "prelogin_source_limited", "upload_budget_exceeded_connections",
+    "monitored_upload_bytes", "monitored_download_bytes", "runtime_generation", "runtime_rejected_reads",
 ];
 pub struct Metrics { values: Vec<AtomicU64> }
 impl Metrics {
@@ -25,7 +27,7 @@ impl Metrics {
         use std::fmt::Write;
         let mut out = String::with_capacity(4096);
         for (i, name) in NAMES.iter().enumerate() {
-            let kind = if [1,2,3,30,32,33,34,35,36].contains(&i) { "gauge" } else { "counter" };
+            let kind = if [1,2,3,30,32,33,34,35,36,42].contains(&i) { "gauge" } else { "counter" };
             let _ = writeln!(out, "# TYPE xddp_gate_{name} {kind}\nxddp_gate_{name} {}", self.get(i));
         }
         let count = self.get(19);

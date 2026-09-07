@@ -4,6 +4,7 @@ mod limiter;
 mod metrics;
 mod protocol;
 mod runtime;
+mod relay;
 
 use config::Config;
 use limiter::{Event, Limiter, Ticket};
@@ -60,6 +61,8 @@ async fn run(cfg:Config) -> Result<(),Box<dyn std::error::Error>> {
         loop { maintenance.limiter.sweep(shard); shard = (shard+1)%64;
             let (p,_) = maintenance.runtime.policy(maintenance.cfg.listen.ip());
             maintenance.metrics.set(34,p.mode as u64); maintenance.metrics.set(35,u64::from(p.observe));
+            let (generation,rejected)=maintenance.runtime.telemetry();
+            maintenance.metrics.set(42,generation); maintenance.metrics.set(43,rejected);
             tokio::time::sleep(Duration::from_millis(100)).await; }
     });
     eprintln!("xddp-gate ready on {}; observation={}",s.cfg.listen,s.runtime.policy(s.cfg.listen.ip()).0.observe);
@@ -137,7 +140,7 @@ async fn handle(mut client:TcpStream,peer:SocketAddr,s:Arc<State>,mut ticket:Tic
         };
         let _status_gauge = Gauge::new(s.metrics.clone(),36);
         drop(handshake);
-        let request = phase(&mut client,&s,&mut left,s.cfg.timeouts.status_ms,1).await?;
+        let request = phase(&mut client,&s,&mut left,s.cfg.timeouts.status_ms,5).await?;
         protocol::status_request(request.body())?; s.metrics.inc(6);
         let (p,blocked) = s.runtime.policy(peer.ip());
         if blocked || !s.limiter.event(&ticket,Event::Status,p) { ticket.server_rejected = true; return Ok(()); }
@@ -145,7 +148,7 @@ async fn handle(mut client:TcpStream,peer:SocketAddr,s:Arc<State>,mut ticket:Tic
         timeout(Duration::from_millis(s.cfg.timeouts.status_ms),client.write_all(&response)).await.map_err(|_|Error::Deadline)?.map_err(|_|Error::Io)?;
         // A successful status-only client may close without a ping; do not score it as churn.
         ticket.status_complete = true;
-        let ping = phase(&mut client,&s,&mut left,s.cfg.timeouts.status_ms,9).await?;
+        let ping = phase(&mut client,&s,&mut left,s.cfg.timeouts.status_ms,13).await?;
         protocol::ping(ping.body())?;
         timeout(Duration::from_millis(s.cfg.timeouts.status_ms),client.write_all(&ping.wire)).await.map_err(|_|Error::Deadline)?.map_err(|_|Error::Io)?;
         return Ok(());
@@ -172,10 +175,10 @@ async fn handle(mut client:TcpStream,peer:SocketAddr,s:Arc<State>,mut ticket:Tic
     }).await;
     let mut backend = match backend { Ok(Ok(b))=>b, _=>{s.metrics.inc(17); ticket.server_rejected = true; return Ok(());} };
     let _admitted_gauge = Gauge::new(s.metrics.clone(),30);
-    ticket.admitted = true;
+    ticket.mark_admitted();
     // Keep identity concurrency accounting until relay ends; no hot-path limiter locks.
     drop(admission); drop(handshake); drop(login);
-    if tokio::io::copy_bidirectional_with_sizes(&mut client,&mut backend,s.cfg.relay_buffer,s.cfg.relay_buffer).await.is_err() {
+    if relay::copy(&mut client,&mut backend,s.cfg.relay_buffer,s.cfg.upload,s.metrics.clone()).await.is_err() {
         s.metrics.inc(25);
     }
     Ok(())

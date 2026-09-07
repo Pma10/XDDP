@@ -27,6 +27,10 @@ def frame(body):
     return vi(len(body))+body
 
 
+def padded_vi(n,width):
+    return bytes([((n >> (7*i)) & 127) | (128 if i<width-1 else 0) for i in range(width)])
+
+
 def handshake(state=2,host=b"localhost",version=47):
     return frame(b"\x00"+vi(version)+vi(len(host))+host+b"\x63\xdd"+vi(state))
 
@@ -152,6 +156,16 @@ async def run(binary,proxy_v2=False):
                     w.close(); await w.wait_closed()
                 assert counts["status"] == before
 
+                # Compatible padded VarInts remain bounded; exact ping bytes survive.
+                r,w=await asyncio.open_connection("127.0.0.1",public)
+                body=padded_vi(0,5)+padded_vi(47,5)+padded_vi(9,5)+b"localhost"+b"\x63\xdd"+padded_vi(1,5)
+                ping=padded_vi(1,5)+b"12345678"
+                wire=padded_vi(len(body),3)+body+padded_vi(5,3)+padded_vi(0,5)+padded_vi(len(ping),3)+ping
+                w.write(wire); await w.drain()
+                assert b'"cached"' in await asyncio.wait_for(readframe(r),2)
+                assert await asyncio.wait_for(readframe(r),2)==ping
+                w.close(); await w.wait_closed()
+
                 # Held status sessions cannot consume every login slot. Existing
                 # relays and a new same-IP login must keep working at the cap.
                 live_reader,live_writer=await asyncio.open_connection("127.0.0.1",public)
@@ -192,7 +206,7 @@ async def run(binary,proxy_v2=False):
                 # Impossible phase lengths are rejected from the length prefix,
                 # without waiting for the attacker to deliver a body.
                 oversize_before=(await metrics(metric))["oversized_packet"]
-                for wire in (vi(2048),handshake()+vi(100),handshake(1)+vi(2)):
+                for wire in (vi(2048),handshake()+vi(100),handshake(1)+vi(6)):
                     r,w=await asyncio.open_connection("127.0.0.1",public)
                     w.write(wire); await w.drain()
                     assert await asyncio.wait_for(r.read(),2)==b""
@@ -200,12 +214,12 @@ async def run(binary,proxy_v2=False):
                 r,w=await asyncio.open_connection("127.0.0.1",public)
                 w.write(handshake(1)+frame(b"\0")); await w.drain()
                 await asyncio.wait_for(readframe(r),2)
-                w.write(vi(10)); await w.drain()
+                w.write(vi(14)); await w.drain()
                 assert await asyncio.wait_for(r.read(),2)==b""
                 w.close(); await w.wait_closed()
                 assert (await metrics(metric))["oversized_packet"]>=oversize_before+4
 
-                bad = [b"\x80"*5,b"\xff\xff\x7f",b"\x80\x00",handshake()+frame(b"\x01\x00"),
+                bad = [b"\x80"*5,b"\x81"*5,b"\xff\xff\x7f",b"\x80\x00",handshake()+frame(b"\x01\x00"),
                        handshake()+frame(b"\x00\x40"+b"a"*64),handshake(3),handshake()+LOGIN+b"more"]
                 # Last entry is valid admission and is intentionally excluded from rejection fixtures.
                 for wire in bad[:-1]:

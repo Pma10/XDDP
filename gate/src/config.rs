@@ -20,6 +20,13 @@ pub struct Rate {
         c.limits.status_connections+=1;
         assert!(c.validate().is_err());
     }
+    #[test] fn upload_and_pending_limits_validate_without_arithmetic_overflow() {
+        let mut c:Config=serde_json::from_str(include_str!("../../config/gate.json")).unwrap();
+        c.upload=Upload {bytes_per_second:1,burst_bytes:0,enforce:true}; assert!(c.validate().is_err());
+        c.upload.burst_bytes=1; assert!(c.validate().is_ok());
+        c.limits.prelogin_ip=c.limits.prelogin+1; assert!(c.validate().is_err());
+        c.limits.prelogin_ip=0; c.limits.admitted=usize::MAX; assert!(c.validate().is_err());
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -45,6 +52,10 @@ pub struct Limits {
     pub backend: usize,
     pub connections_ip: usize,
     pub connections_prefix: usize,
+    #[serde(default)]
+    pub prelogin_ip: usize,
+    #[serde(default)]
+    pub prelogin_prefix: usize,
     pub ip_entries: usize,
     pub prefix_entries: usize,
     pub idle_entry_seconds: u64,
@@ -55,6 +66,8 @@ pub struct Limits {
     pub global: Rates,
     pub mode_multipliers: [f64; 4],
     pub churn_score_threshold: f64,
+    #[serde(default)]
+    pub churn_prefix_score_threshold: f64,
     pub churn_half_life_seconds: u64,
     pub churn_window_seconds: u64,
     pub penalty_seconds: u64,
@@ -105,10 +118,20 @@ pub struct Config {
     pub runtime_file: String,
     pub workers: usize,
     pub relay_buffer: usize,
+    #[serde(default)]
+    pub upload: Upload,
     pub limits: Limits,
     pub timeouts: Timeouts,
     pub protocol: Protocol,
     pub cache: Cache,
+}
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Upload {
+    pub bytes_per_second: u64,
+    pub burst_bytes: u64,
+    #[serde(default)]
+    pub enforce: bool,
 }
 impl Config {
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
@@ -120,6 +143,10 @@ impl Config {
     }
     pub fn validate(&self) -> Result<(), String> {
         let l = &self.limits;
+        if self.upload.bytes_per_second > 1_000_000_000 || self.upload.burst_bytes > 1_000_000_000 ||
+            (self.upload.bytes_per_second == 0) != (self.upload.burst_bytes == 0) {
+            return Err("upload rate/burst must both be zero or positive and <=1e9".into());
+        }
         if self.workers == 0 || self.workers > 64 || !(1024..=65536).contains(&self.relay_buffer) {
             return Err("invalid workers/relay_buffer".into());
         }
@@ -140,12 +167,15 @@ impl Config {
         }
         if l.total_sockets < 4 || l.total_sockets > 100000 || l.prelogin == 0 ||
             l.status_connections > l.prelogin ||
+            l.prelogin_ip > l.prelogin || l.prelogin_prefix > l.prelogin ||
+            l.prelogin > l.total_sockets || l.admitted > l.total_sockets || l.backend > l.total_sockets ||
             l.admitted == 0 || l.backend < 2 || l.prelogin + l.admitted + l.backend > l.total_sockets ||
             l.ip_entries < 64 || l.ip_entries > 1_000_000 || l.prefix_entries < 64 ||
             l.prefix_entries > 1_000_000 || l.ip_entries % 64 != 0 || l.prefix_entries % 64 != 0 ||
             l.ipv4_prefix > 32 || l.ipv6_prefix > 128 || l.idle_entry_seconds == 0 ||
             l.churn_half_life_seconds == 0 || l.churn_window_seconds > 60 || l.penalty_seconds > 3600 ||
-            !l.churn_score_threshold.is_finite() || l.churn_score_threshold < 0.0 {
+            !l.churn_score_threshold.is_finite() || l.churn_score_threshold < 0.0 ||
+            !l.churn_prefix_score_threshold.is_finite() || l.churn_prefix_score_threshold < 0.0 {
             return Err("invalid resource/identity/penalty limits".into());
         }
         for rates in [&l.ip, &l.prefix, &l.global] {

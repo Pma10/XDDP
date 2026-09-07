@@ -9,6 +9,7 @@
   "runtime_file": "/run/xddp/runtime.json",
   "workers": 2,
   "relay_buffer": 8192,
+  "upload": {"bytes_per_second": 0, "burst_bytes": 0, "enforce": false},
   "limits": {
     "total_sockets": 10000,
     "prelogin": 512,
@@ -17,6 +18,8 @@
     "backend": 4097,
     "connections_ip": 0,
     "connections_prefix": 0,
+    "prelogin_ip": 0,
+    "prelogin_prefix": 0,
     "ip_entries": 65536,
     "prefix_entries": 16384,
     "idle_entry_seconds": 120,
@@ -27,6 +30,7 @@
     "global": {"connect": {"per_second": 0, "burst": 0}, "handshake": {"per_second": 0, "burst": 0}, "status": {"per_second": 0, "burst": 0}, "login": {"per_second": 0, "burst": 0}},
     "mode_multipliers": [1.0, 0.8, 0.5, 0.1],
     "churn_score_threshold": 0,
+    "churn_prefix_score_threshold": 0,
     "churn_half_life_seconds": 30,
     "churn_window_seconds": 3,
     "penalty_seconds": 10
