@@ -93,10 +93,15 @@ tickets, semaphores and task/allocator overhead. Phase-specific length checks
 usually impose a smaller bound and reject impossible lengths before allocation.
 Status slots are a subset of prelogin slots, not an additional socket pool.
 Relay buffers are 8 KiB per direction: approximately 64 MiB at 4,096 admitted
-clients. Cache is one bounded response plus bounded parsing/fallback buffers.
+clients. Cache retains one bounded canonical response plus one prepared
+prefix/suffix pair per current/fallback snapshot, with bounded refresh and active
+response buffers. Client protocol variety creates no retained cache entries.
 Application memory remains bounded, but these values exclude kernel TCP buffers.
 The optional upload guard uses a fixed-size per-connection token bucket and shares
 the existing relay buffers. It creates no queue, per-packet allocation or IP map.
+Optional relay deadlines add per-direction timer state only while writes stall
+and one shared EOF notification per connection. Backend protection holds a fixed
+circuit state and a connecting semaphore, with no client-indexed table.
 
 The configured 10,000 socket budget is independent of systemd's 524,288 FD ceiling.
 Admission/default backend/prelogin caps jointly stay below the budget. Leave

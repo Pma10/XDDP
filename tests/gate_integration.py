@@ -31,7 +31,7 @@ def padded_vi(n,width):
     return bytes([((n >> (7*i)) & 127) | (128 if i<width-1 else 0) for i in range(width)])
 
 
-def handshake(state=2,host=b"localhost",version=47):
+def handshake(state=2,host=b"localhost",version=757):
     return frame(b"\x00"+vi(version)+vi(len(host))+host+b"\x63\xdd"+vi(state))
 
 
@@ -270,7 +270,8 @@ async def run(binary,proxy_v2=False):
                 failures_before=final["backend_connect_failures"]
                 r,w=await asyncio.open_connection("127.0.0.1",public)
                 w.write(handshake()+LOGIN); await w.drain()
-                assert await asyncio.wait_for(r.read(),2)==b""
+                # A refused connect can wait for the configured deadline on Windows.
+                assert await asyncio.wait_for(r.read(),cfg["timeouts"]["backend_ms"]/1000+1)==b""
                 w.close(); await w.wait_closed()
                 failed=await metrics(metric)
                 assert failed["backend_connect_failures"]==failures_before+1

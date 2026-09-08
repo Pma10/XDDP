@@ -3,6 +3,7 @@ import ipaddress
 import json
 import math
 import urllib.parse
+from pathlib import Path
 
 MODES = ("normal", "elevated", "attack", "emergency")
 MAX_DOCUMENT_BYTES = 262144
@@ -21,7 +22,26 @@ def runtime_document(cfg, generation, expires_unix, mode):
         block=sorted(set(cfg["block_prefixes"]) | set(cfg["bogon_prefixes"]))))
 SIGNALS = {"pps", "bps", "syn_per_second", "accepts_per_second", "handshakes_per_second",
            "status_per_second", "logins_per_second", "churn_per_second", "active_prelogin",
-           "new_ip_entries_per_second", "new_prefix_entries_per_second"}
+           "new_ip_entries_per_second", "new_prefix_entries_per_second", "active_status",
+           "backend_connections", "backend_failures_per_second", "resource_limited_per_second", "conntrack_percent"}
+
+
+def host_pressure(root=Path("/proc/sys/net/netfilter")):
+    """Optional read-only pressure signal. Missing/invalid values are not zero load."""
+    try:
+        values=[]
+        for name in ("nf_conntrack_count", "nf_conntrack_max"):
+            with (root / name).open("rb") as stream:
+                raw=stream.read(65)
+            if len(raw)>64 or not raw.strip().isdigit():
+                return {}
+            values.append(int(raw))
+        count, maximum=values
+        if maximum<=0:
+            return {}
+        return {"conntrack_percent":min(100.0,100.0*count/maximum)}
+    except (OSError, ValueError, OverflowError):
+        return {}
 
 
 def positive(value, name, minimum=1, maximum=1_000_000_000):
@@ -80,8 +100,14 @@ def validate(cfg):
         if (bucket["rate"] == 0) != (bucket["burst"] == 0):
             raise ValueError("SYN rate and burst must both be zero or positive")
     a = cfg["adaptive"]
-    if set(a) != {"up_samples", "down_samples", "cooldown_seconds", "thresholds"}:
+    required = {"up_samples", "down_samples", "cooldown_seconds", "thresholds"}
+    if not required <= set(a) or set(a) - required - {"required_signals", "allow_emergency"}:
         raise ValueError("invalid adaptive keys")
+    if type(a.get("allow_emergency", False)) is not bool:
+        raise ValueError("adaptive allow_emergency must be boolean")
+    guards = a.get("required_signals", {})
+    if not isinstance(guards, dict) or not set(guards) <= set(MODES[1:]):
+        raise ValueError("invalid required signal modes")
     for n in ("up_samples", "down_samples", "cooldown_seconds"):
         positive(a[n], n, 1, 3600)
         if type(a[n]) is not int:
@@ -98,6 +124,10 @@ def validate(cfg):
             positive(bands["exit"], name, 0)
             if bands["exit"] >= bands["enter"]:
                 raise ValueError("exit must be below enter")
+        names = guards.get(mode, [])
+        if (not isinstance(names, list) or any(not isinstance(n, str) for n in names)
+                or len(names) != len(set(names)) or not set(names) <= set(thresholds)):
+            raise ValueError("required signals must be unique configured threshold names")
     # Check both writer formats before any map, persistent config or lease change.
     bounded_json(cfg, indent=2)
     runtime_document(cfg, (1 << 64)-1, (1 << 64)-1, 3)
@@ -115,8 +145,12 @@ class Adaptive:
     def sample(self, signals, now):
         target = 0
         for i, mode in enumerate(MODES[1:], 1):
+            if mode == "emergency" and not self.cfg.get("allow_emergency", False):
+                continue
             bands = self.cfg["thresholds"][mode]
-            if any(n in signals and math.isfinite(signals[n]) and signals[n] >= b["enter"] for n, b in bands.items()):
+            high = {n for n, b in bands.items() if n in signals and math.isfinite(signals[n]) and signals[n] >= b["enter"]}
+            guards = self.cfg.get("required_signals", {}).get(mode, [])
+            if high and all(n in high for n in guards):
                 target = i
         if target > self.mode:
             self.up = self.up + 1 if self.target == target else 1
@@ -144,10 +178,13 @@ def rates(previous, current, dt):
                      "tcp_accepts": "accepts_per_second", "handshake_ok": "handshakes_per_second",
                      "status_requests": "status_per_second", "login_starts": "logins_per_second",
                      "churn": "churn_per_second", "new_ip_entries": "new_ip_entries_per_second",
-                     "new_prefix_entries": "new_prefix_entries_per_second"}
+                     "new_prefix_entries": "new_prefix_entries_per_second",
+                     "backend_connect_failures": "backend_failures_per_second",
+                     "resource_limited": "resource_limited_per_second"}
     for counter, signal in counter_names.items():
         if counter in current and counter in previous and current[counter] >= previous[counter]:
             result[signal] = (current[counter] - previous[counter]) / dt * (8 if signal == "bps" else 1)
-    if "active_prelogin" in current:
-        result["active_prelogin"] = current["active_prelogin"]
+    for gauge in ("active_prelogin", "active_status", "backend_connections", "conntrack_percent"):
+        if gauge in current:
+            result[gauge] = current[gauge]
     return result

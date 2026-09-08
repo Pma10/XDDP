@@ -135,6 +135,8 @@ migration plan and console access.
 ## Documents and tools
 
 - [Threat model, architecture and decision path](docs/DESIGN.md)
+- [L3/L4/L7 공격 시나리오와 방어 전략](docs/ATTACK_SCENARIOS.ko.md)
+- [송신 정체·백엔드 장애·자동 대응 보호 설정](docs/RESILIENCE.ko.md)
 - [Map/state sizes and memory estimates](docs/MEMORY.md)
 - [Configuration and metrics](docs/CONFIGURATION.md)
 - [Deployment, upgrade and rollback](docs/DEPLOYMENT.md)

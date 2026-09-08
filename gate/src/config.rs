@@ -7,9 +7,44 @@ pub struct Rate {
     pub per_second: f64,
     pub burst: f64,
 }
+impl Rate {
+    pub fn valid(&self)->bool {
+        self.per_second.is_finite() && self.burst.is_finite() && self.per_second>=0.0 &&
+        self.per_second<=1e9 && self.burst>=0.0 && self.burst<=1e9 &&
+        ((self.per_second==0.0 && self.burst==0.0) || (self.per_second>0.0 && self.burst>=1.0))
+    }
+}
 
 #[cfg(test)] mod tests {
     use super::*;
+    #[test] fn protocol_range_defaults_and_invalid_bounds() {
+        let mut raw:serde_json::Value=serde_json::from_str(include_str!("../../config/gate.json")).unwrap();
+        for key in ["min_protocol","max_protocol","future_login_schema"] {
+            raw["protocol"].as_object_mut().unwrap().remove(key);
+        }
+        let mut c:Config=serde_json::from_value(raw).unwrap();
+        assert_eq!((c.protocol.min_protocol,c.protocol.max_protocol),(757,776));
+        assert!(c.validate().is_ok());
+        c.protocol.min_protocol=777; assert!(c.validate().is_err());
+        c.protocol.min_protocol=-1; assert!(c.validate().is_err());
+    }
+    #[test] fn new_guards_are_optional_and_reject_partial_circuit_configuration() {
+        let mut raw:serde_json::Value=serde_json::from_str(include_str!("../../config/gate.json")).unwrap();
+        raw.as_object_mut().unwrap().remove("backend_protection");
+        raw["timeouts"].as_object_mut().unwrap().remove("relay_stall_ms");
+        raw["timeouts"].as_object_mut().unwrap().remove("half_close_ms");
+        raw["timeouts"].as_object_mut().unwrap().remove("client_idle_ms");
+        let mut c:Config=serde_json::from_value(raw).unwrap(); assert!(c.validate().is_ok());
+        assert_eq!(c.timeouts.relay_stall_ms,0); assert_eq!(c.backend_protection.failure_threshold,0);
+        c.backend_protection.failure_threshold=2; assert!(c.validate().is_err());
+        c.backend_protection.cooldown_ms=1000; assert!(c.validate().is_ok());
+        c.timeouts.half_close_ms=3600001; assert!(c.validate().is_err());
+        c.timeouts.half_close_ms=0; c.timeouts.client_idle_ms=3600001; assert!(c.validate().is_err());
+        c.timeouts.client_idle_ms=0;
+        c.backend_protection.attempts=Rate {per_second:f64::NAN,burst:1.0}; assert!(c.validate().is_err());
+        c.backend_protection.attempts=Rate {per_second:1.0,burst:0.0}; assert!(c.validate().is_err());
+        c.backend_protection.attempts.burst=2.0; assert!(c.validate().is_ok());
+    }
     #[test] fn status_capacity_is_optional_and_bounded_by_prelogin() {
         let mut raw:serde_json::Value=serde_json::from_str(include_str!("../../config/gate.json")).unwrap();
         raw["limits"].as_object_mut().unwrap().remove("status_connections");
@@ -103,10 +138,22 @@ pub struct Timeouts {
     pub status_ms: u64,
     pub backend_ms: u64,
     pub shutdown_seconds: u64,
+    #[serde(default)]
+    pub relay_stall_ms: u64,
+    #[serde(default)]
+    pub half_close_ms: u64,
+    #[serde(default)]
+    pub client_idle_ms: u64,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Protocol {
+    /// Inclusive Login protocol-ID range. Status discovery remains independent
+    /// because status clients legitimately use protocol -1.
+    #[serde(default = "default_min_protocol")]
+    pub min_protocol: i32,
+    #[serde(default = "default_max_protocol")]
+    pub max_protocol: i32,
     pub max_frame: usize,
     pub max_initial_bytes: usize,
     pub max_host_bytes: usize,
@@ -115,7 +162,15 @@ pub struct Protocol {
     pub allowed_ports: Vec<u16>,
     pub strict_username: bool,
     pub login_schemas: BTreeMap<i32, String>,
+    /// Structural schema for protocol versions newer than the built-in table.
+    /// This keeps future clients bounded to a known Login Start layout.
+    #[serde(default = "default_future_login_schema")]
+    pub future_login_schema: String,
 }
+
+fn default_future_login_schema() -> String { "uuid".to_string() }
+fn default_min_protocol() -> i32 { 757 }
+fn default_max_protocol() -> i32 { 776 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Cache {
@@ -141,10 +196,21 @@ pub struct Config {
     pub relay_buffer: usize,
     #[serde(default)]
     pub upload: Upload,
+    #[serde(default)]
+    pub backend_protection: BackendProtection,
     pub limits: Limits,
     pub timeouts: Timeouts,
     pub protocol: Protocol,
     pub cache: Cache,
+}
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackendProtection {
+    pub max_connecting: usize,
+    pub failure_threshold: u32,
+    pub cooldown_ms: u64,
+    #[serde(default)]
+    pub attempts: Rate,
 }
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -164,6 +230,14 @@ impl Config {
     }
     pub fn validate(&self) -> Result<(), String> {
         let l = &self.limits;
+        let b=self.backend_protection;
+        if b.max_connecting>l.backend || b.failure_threshold>10000 || b.cooldown_ms>120000 || !b.attempts.valid() ||
+            (b.failure_threshold==0)!=(b.cooldown_ms==0) {
+            return Err("invalid backend protection bounds; threshold/cooldown must both be enabled or disabled".into());
+        }
+        if self.timeouts.relay_stall_ms>3600000 || self.timeouts.half_close_ms>3600000 || self.timeouts.client_idle_ms>3600000 {
+            return Err("relay deadlines must be 0 (disabled) or <=3600000 ms".into());
+        }
         if self.upload.bytes_per_second > 1_000_000_000 || self.upload.burst_bytes > 1_000_000_000 ||
             (self.upload.bytes_per_second == 0) != (self.upload.burst_bytes == 0) {
             return Err("upload rate/burst must both be zero or positive and <=1e9".into());
@@ -202,10 +276,7 @@ impl Config {
         }
         for rates in [&l.ip, &l.prefix, &l.global] {
             for r in rates.list() {
-                if !r.per_second.is_finite() || !r.burst.is_finite() || r.per_second < 0.0 ||
-                    r.per_second > 1e9 || r.burst < 0.0 || r.burst > 1e9 ||
-                    (r.per_second == 0.0) != (r.burst == 0.0) ||
-                    (r.burst > 0.0 && r.burst < 1.0) {
+                if !r.valid() {
                     return Err("rates must be disabled (0/0) or finite positive rate/burst >=1".into());
                 }
             }
@@ -218,8 +289,10 @@ impl Config {
         if !(64..=65536).contains(&p.max_frame) || p.max_initial_bytes < p.max_frame + 5 ||
             p.max_initial_bytes > 131072 || !(1..=4096).contains(&p.max_host_bytes) ||
             p.max_host_bytes > p.max_frame || p.allowed_ports.contains(&0) ||
+            p.min_protocol < 0 || p.min_protocol > p.max_protocol ||
             p.allowed_hosts.len() > 256 || p.login_schemas.len() > 1024 ||
-            p.login_schemas.values().any(|x| !matches!(x.as_str(), "legacy"|"signed"|"signed_uuid"|"optional_uuid"|"uuid")) {
+            p.login_schemas.values().any(|x| !matches!(x.as_str(), "legacy"|"signed"|"signed_uuid"|"optional_uuid"|"uuid"|"backend")) ||
+            !matches!(p.future_login_schema.as_str(), "disabled"|"backend"|"legacy"|"signed"|"signed_uuid"|"optional_uuid"|"uuid") {
             return Err("invalid protocol bounds/schema".into());
         }
         for ms in [self.timeouts.first_progress_ms, self.timeouts.progress_ms,
@@ -231,7 +304,7 @@ impl Config {
             self.cache.ttl_seconds > 300 || !(256..=65536).contains(&self.cache.max_response_bytes) ||
             self.cache.host.is_empty() || self.cache.host.len() > 255 || self.cache.port == 0 ||
             !self.cache.fallback.is_object() ||
-            serde_json::to_vec(&self.cache.fallback).map_err(|e| e.to_string())?.len() + 10 > self.cache.max_response_bytes {
+            !crate::cache::valid_status(&self.cache.fallback,self.cache.max_response_bytes) {
             return Err("invalid cache/deadline configuration".into());
         }
         Ok(())

@@ -27,6 +27,8 @@
     "emergency": {"rate": 0, "burst": 0}
   },
   "adaptive": {
+    "allow_emergency": false,
+    "required_signals": {},
     "up_samples": 3,
     "down_samples": 30,
     "cooldown_seconds": 60,

@@ -104,3 +104,43 @@ by the repository's GitHub Actions using the user's local Git authentication.
 No successful production tests or benchmark figures are implied. Follow
 [deployment](DEPLOYMENT.md) and [benchmark methodology](BENCHMARKS.md) to resolve
 these environment-specific acceptance gates before enforcement.
+## 2026-09-08 resilience changes: local verification
+
+Rust 1.85.0 (`x86_64-pc-windows-gnu`) compiled the changed gate with the locked
+dependencies. All 38 Rust unit tests passed, including stalled writes, healthy
+idle, absolute half-close drain, circuit recovery/late completions, configuration
+compatibility and prepared status JSON preservation. Controller policy tests:
+10 passed; 10 Linux-only controller I/O tests skipped on Windows.
+
+Loopback TCP integration passed: base gate with and without PROXY v2, status/login
+fairness, upload disabled/monitor/enforce, and the new outage/backoff/recovery
+scenario. The existing refused-connect fixture now waits for the configured
+backend deadline rather than assuming an immediate OS refusal. Python compilation
+and `git diff --check` passed. Setup and CI include the new resilience integration.
+
+These are local functional results, not Linux deployment, NIC/kernel capacity,
+real Minecraft/BotSentry compatibility or live-server attack tests. Linux CI and
+production configuration activation remain separate. No new CI result is claimed.
+
+### Minecraft scenario boundary audit
+
+A further bounded loopback audit used an echo backend (no authentication or
+BotSentry), four prelogin slots, two status slots, enabled relay/circuit guards,
+and disabled rate buckets. It confirmed:
+
+- Two classified status holders fill their cap; an extra status holder is rejected
+  while a valid Login Start still reaches the backend.
+- Four silent TCP peers fill the shared prelogin pool. A new connection is refused
+  while an already admitted echo session remains usable. Deadlines reclaim all
+  held slots and subsequent login succeeds. This is resource protection, not
+  guaranteed admission fairness during sustained distributed replenishment.
+- Valid Handshake + Login Start + arbitrary trailing bytes in one write forwards
+  those trailing bytes to the backend, by the opaque-relay design. After admission,
+  idle connections also survive a configured write-stall timeout. Backend protocol
+  validation/authentication deadlines remain necessary.
+- Ten sequential valid login/connect-close cycles all reach a healthy backend
+  without opening the outage circuit. The circuit is not a login rate limiter.
+
+Local audit evidence: `artifacts/minecraft-scenario-audit.json` (ignored local
+artifact). These scenarios establish behavior boundaries, not an attack PPS/bps
+capacity claim or validation of the deployed Linux configuration.

@@ -29,12 +29,31 @@ The sample nonzero multipliers only scale operator-configured rates; they are
 not production thresholds. All actual rates/transition thresholds require data.
 
 An adaptive threshold entry has `enter` and lower `exit` values. Any available
-signal crossing `enter` selects the corresponding severity. Escalation requires
+signal crossing `enter` selects the corresponding severity unless that mode has
+an `adaptive.required_signals` list: every listed signal must also be present and
+at/above its own enter threshold. Names must refer to thresholds configured for
+that mode. This permits traffic plus resource-pressure corroboration, rather than
+using raw interface PPS alone. Missing required signals prevent escalation.
+`adaptive.allow_emergency` defaults to **false**, including when omitted from old
+configurations: automatic escalation stops at ATTACK unless explicitly enabled.
+Manual EMERGENCY remains available. Escalation requires
 consecutive samples and cooldown. De-escalation requires every signal configured
 for the current mode to be present and below `exit`, consecutive samples and
 cooldown, then decreases one mode. Missing telemetry cannot itself escalate or
 justify recovery. Empty bands never trigger a mode. Samples reset after counter
 restart; negative deltas are discarded.
+
+Additional pressure signals are `active_status`, `backend_connections`,
+`backend_failures_per_second`, `resource_limited_per_second`, and
+`conntrack_percent`. The latter reads count/max from procfs with bounded reads;
+if conntrack is unavailable/invalid the signal is absent, not zero. It does not
+change conntrack/sysctl/firewall configuration. A backend outage alone is not
+proof of an attacker; prefer the backend circuit below before broad denial.
+
+For example, a mode with thresholds for `pps` and `active_prelogin` can use
+`"required_signals": {"attack": ["pps", "active_prelogin"]}` to require both.
+An empty map retains any-signal behavior for non-emergency modes. No new
+production thresholds are provided.
 
 Controller leases use CLOCK_MONOTONIC-compatible nanoseconds for XDP. Gate state
 combines a short wall-clock expiry with a local monotonic receipt deadline and a
@@ -113,6 +132,13 @@ charges available buckets without creating token debt.
 
 ## Minecraft compatibility
 
+`protocol.min_protocol` and `protocol.max_protocol` are inclusive Login
+protocol-ID bounds. The sample defaults to `757` through `776`, covering Java
+1.18 through 26.2. Set the maximum to a measured ceiling when the backend must
+reject versions above it, or raise it deliberately for a newer release; IDs
+outside the range close before backend dialing. Status discovery is separate
+and still permits protocol `-1`.
+
 Frame length checks also use the current phase's accepted wire layout before
 allocating or reading the body: status request is up to five bytes, ping up to thirteen bytes,
 handshake is bounded by the configured host limit, and Login Start by its selected
@@ -154,6 +180,46 @@ guard; `monitored_download_bytes` counts successful writes to the client socket.
 Both byte counters cover monitored relays only and exclude prelogin/cache traffic.
 Budgets use no shared mutex and introduce no extra relay buffer.
 
+## Relay progress and backend outage protection
+
+`timeouts.relay_stall_ms` and `timeouts.half_close_ms` are optional, default 0
+(disabled), and bounded at 3,600,000 ms. Nonzero values are hard per-connection
+resource deadlines, independent of controller observation, modes and allow lists.
+
+- `relay_stall_ms` starts only when a write/flush/shutdown is pending, separately
+  for each direction. A successful operation clears the timer. Healthy idle
+  connections do not start timers. Kernel-buffered data may delay detection of a
+  peer that stops reading; this is application write progress, not proof of TCP
+  acknowledgments or a TCP_USER_TIMEOUT implementation. A peer that continues to
+  make small write progress can evade a no-progress timeout.
+- `half_close_ms` limits the remaining lifetime after the relay observes either
+  read EOF. Reverse data remains allowed during this absolute drain window and
+  cannot extend it. It can truncate a legitimate unusually long half-close reply,
+  so size from real traffic. Enable the stall guard too for blocked buffered writes
+  that prevent the relay reaching EOF.
+- `relay_stall_timeouts` and `half_close_timeouts` count closes; neither generates
+  an IP/prefix penalty. Normal FIN/half-close handling is preserved within the window.
+
+Optional `backend_protection` has `max_connecting`, `failure_threshold`,
+`cooldown_ms` and an `attempts` rate/burst, all default 0. `max_connecting` bounds player backend connect plus
+initial writes (not established relays); zero uses the existing backend slot cap.
+`failure_threshold` consecutive connect/initial-write failures open a circuit for
+`cooldown_ms`, after which exactly one player attempt probes recovery. A success
+resets it; a failure waits again. Completions from an older failure wave cannot
+clear the circuit. Cancelled unfinished attempts count as failures and release slots.
+Threshold and cooldown must both be zero or positive, at most 10,000 and 120,000 ms.
+When `attempts` is enabled, it limits all player backend dial attempts after
+admission, including successful connect/close loops. Size its burst for shared-NAT
+reconnects; it is gate-wide rather than per IP.
+
+This is an opt-in hard resource policy, including during observation. Rejected
+attempts close without queuing, backend dials or churn penalties. Status polling
+keeps its one independently bounded task, so the cache can recover during a player
+outage. Existing relays continue. Metrics are `backend_protection_rejected` and
+`backend_circuit_opened`. Backend/BotSentry closes **after** successful initial
+writes do not trip the circuit: use existing global login rate/burst and backend
+authentication timeouts to bound syntactically valid connect/close loops.
+
 ## Policy publication checks
 
 The controller verifies that both its saved configuration and runtime document
@@ -180,17 +246,23 @@ Login Start built-in layouts:
 | 759 | Name, optional timestamp/key/signature |
 | 760 | Same plus optional UUID |
 | 761–763 | Name, optional UUID |
-| 764–775 | Name, required UUID (verified through 26.1 layout) |
+| 764–776 | Name, required UUID (verified through 26.2 layout) |
 
 These ranges select a structural layout; they are not proof that every integer
-is a released version. Newer/snapshot/custom versions require a `login_schemas`
-mapping to `legacy`, `signed`, `signed_uuid`, `optional_uuid` or `uuid` after
-checking the actual wire layout. No unchecked trailing-byte escape hatch exists.
-Status permits protocol -1 discovery. Legacy pre-Netty `0xFE` status ping and
-the separate transfer handshake nextState=3 are not implemented. A compatibility
-audit must include the real client/proxy/mod mix. Protocol 776 and later requires
-an explicit verified schema mapping; version metadata alone does not prove a
-Login Start wire layout.
+is a released version. Exact newer/snapshot/custom versions can use a
+`login_schemas` mapping to `legacy`, `signed`, `signed_uuid`, `optional_uuid`,
+`uuid` or `backend` after checking the actual wire layout. Status permits protocol -1
+discovery. Legacy pre-Netty `0xFE` status ping and the separate transfer
+handshake nextState=3 are not implemented. A compatibility audit must include
+the real client/proxy/mod mix.
+
+For protocol IDs 777 and later, `protocol.future_login_schema` defaults to
+`uuid`, which covers current ViaVersion-compatible Login Start frames. Set it to
+`backend` when the backend proxy owns future protocol decoding: XDDP validates
+the frame, packet id, size and phase deadline, then relays the opaque Login Start
+payload. Set it to `disabled` to retain strict rejection. Exact
+`login_schemas` entries override this fallback. `backend` is bounded
+compatibility, not unchecked TCP pass-through.
 
 The gate validates public-key blob lengths, not signatures or player identity.
 Backend online-mode/Velocity handles authentication and subsequent state.
@@ -220,6 +292,13 @@ depends on more than the protocol field need separate gate instances/configurati
 Cache TTL expiry uses configured fallback JSON rather than unbounded stale data or
 client-triggered refresh. The refresh timeout, response limit and JSON recursion
 bound apply.
+
+JSON serialization is now performed on refresh. The cache stores a canonical
+wire response and a prepared prefix/suffix; each client response only inserts
+the decimal protocol number and copies bounded bytes. Client-controlled protocol
+numbers cannot create cache entries or trigger backend polls. RGB components,
+custom fields and favicon are preserved as JSON values. The maximum response
+limit reserves space for any nonnegative i32 protocol before publishing a refresh.
 
 ## Metrics
 

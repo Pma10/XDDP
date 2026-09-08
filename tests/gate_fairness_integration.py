@@ -116,22 +116,22 @@ async def run(binary):
                 assert (await metrics(metric))["rate_limited_global"]==1
                 live_w.write(b"still-playing"); await live_w.drain()
                 assert await asyncio.wait_for(live_r.readexactly(13),2)==b"still-playing"
-                # An unmapped schema must not ban a compatible same-IP reconnect.
+                # The highest supported protocol uses the bounded UUID schema and
+                # must not ban a compatible same-IP reconnect.
                 r,w=await connect()
-                w.write(handshake(version=9999)); await w.drain()
-                assert await closed(r)==b""; w.close()
-                assert (await metrics(metric))["unsupported_protocol"]==1
+                w.write(handshake(version=776)+frame(b"\x00\x06Player"+bytes(16))); await w.drain()
+                assert await asyncio.wait_for(r.readexactly(8),2)==b"admitted"
                 new_r,new_w=await login()
                 new_w.write(b"reconnected"); await new_w.drain()
                 assert await asyncio.wait_for(new_r.readexactly(11),2)==b"reconnected"
                 await finish_status(third)
-                new_w.close(); live_w.close()
+                w.close(); new_w.close(); live_w.close()
                 await wait_metric(metric,"active_connections",0)
                 result=await metrics(metric)
                 assert result["churn"]==0
                 assert result["active_prelogin"]==result["active_status"]==result["admitted_clients"]==0
-                assert counts=={"login":2,"status":1}
-                print("PASS: status source/global cap fairness, early status budget, isolated login tokens, same-IP reconnect after unsupported version, live relay and zero churn")
+                assert counts=={"login":3,"status":1}
+                print("PASS: status source/global cap fairness, early status budget, future protocol admission, live relay and zero churn")
             finally:
                 for w in player_writers: w.close()
                 process.terminate()

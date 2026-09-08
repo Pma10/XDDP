@@ -1,4 +1,5 @@
 mod cache;
+mod backend;
 mod config;
 mod limiter;
 mod metrics;
@@ -17,6 +18,7 @@ struct State {
     cfg:Arc<Config>, metrics:Arc<Metrics>, limiter:Arc<Limiter>, runtime:Arc<runtime::Runtime>,
     cache:Arc<cache::StatusCache>, sockets:Arc<Semaphore>, prelogin:Arc<Semaphore>,
     admitted:Arc<Semaphore>, backend:Arc<Semaphore>, status:Arc<Semaphore>,
+    backend_protection:Arc<backend::Protection>,
 }
 struct PreloginTime { start:Instant, metrics:Arc<Metrics> }
 impl Drop for PreloginTime {
@@ -46,6 +48,7 @@ async fn run(cfg:Config) -> Result<(),Box<dyn std::error::Error>> {
     let metrics_listener = TcpListener::bind(cfg.metrics).await?;
     let m = Arc::new(Metrics::new());
     let s = Arc::new(State {
+        backend_protection:backend::Protection::new(cfg.backend_protection,cfg.limits.backend-1,m.clone()),
         limiter:Limiter::new(cfg.limits.clone(),m.clone()), runtime:runtime::Runtime::new(if cfg.runtime_file.is_empty() {cfg.observe} else {true}),
         cache:cache::StatusCache::new(&cfg), sockets:Arc::new(Semaphore::new(cfg.limits.total_sockets)),
         prelogin:Arc::new(Semaphore::new(cfg.limits.prelogin)), admitted:Arc::new(Semaphore::new(cfg.limits.admitted)),
@@ -180,6 +183,9 @@ async fn handle(mut client:TcpStream,peer:SocketAddr,s:Arc<State>,mut ticket:Tic
         s.metrics.inc(20); ticket.server_rejected = true; return Ok(());
     };
     let (_admitted,_backend_slot,_backend_socket) = (admitted,backend_slot,backend_socket);
+    let Some(attempt)=s.backend_protection.enter(std::time::Instant::now()) else {
+        s.metrics.inc(47); ticket.server_rejected=true; return Ok(());
+    };
     let _backend_gauge = Gauge::new(s.metrics.clone(),3);
     s.metrics.inc(31);
     let backend = timeout(Duration::from_millis(s.cfg.timeouts.backend_ms),async {
@@ -189,12 +195,14 @@ async fn handle(mut client:TcpStream,peer:SocketAddr,s:Arc<State>,mut ticket:Tic
         backend.write_all(&handshake.wire).await?; backend.write_all(&login.wire).await?;
         Ok::<_,std::io::Error>(backend)
     }).await;
+    attempt.finish(matches!(&backend,Ok(Ok(_))),std::time::Instant::now());
     let mut backend = match backend { Ok(Ok(b))=>b, _=>{s.metrics.inc(17); ticket.server_rejected = true; return Ok(());} };
     let _admitted_gauge = Gauge::new(s.metrics.clone(),30);
     ticket.mark_admitted();
     // Keep identity concurrency accounting until relay ends; no hot-path limiter locks.
     drop(admission); drop(handshake); drop(login);
-    if relay::copy(&mut client,&mut backend,s.cfg.relay_buffer,s.cfg.upload,s.metrics.clone()).await.is_err() {
+    if relay::protected_copy(&mut client,&mut backend,s.cfg.relay_buffer,s.cfg.upload,
+        s.cfg.timeouts.relay_stall_ms,s.cfg.timeouts.half_close_ms,s.cfg.timeouts.client_idle_ms,s.metrics.clone()).await.is_err() {
         s.metrics.inc(25);
     }
     Ok(())

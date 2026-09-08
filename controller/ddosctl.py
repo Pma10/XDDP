@@ -14,7 +14,7 @@ import sys
 import time
 import urllib.request
 
-from core import Adaptive, MODES, rates, validate, bounded_json, runtime_document
+from core import Adaptive, MODES, rates, validate, bounded_json, runtime_document, host_pressure
 
 
 def atomic(path, data, mode=0o644):
@@ -101,6 +101,7 @@ class Controller:
     def tick(self):
         now = time.monotonic()
         current = self.loader("stats",self.cfg["pin_dir"])
+        current.update(host_pressure())
         self.snapshot = copy.deepcopy(current)
         try:
             current.update(self.gate_counters())

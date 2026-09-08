@@ -140,16 +140,24 @@ pub fn handshake(data: &[u8], cfg: &Protocol) -> Result<Handshake, Error> {
     Ok(Handshake { version, state })
 }
 fn login_schema(version: i32, cfg: &Protocol) -> Result<&str, Error> {
-    Ok(match cfg.login_schemas.get(&version) {
+    if version < cfg.min_protocol || version > cfg.max_protocol { return Err(Error::Unsupported); }
+    let schema = match cfg.login_schemas.get(&version) {
         Some(schema) => schema.as_str(),
         None => match version {
             4..=758 => "legacy", 759 => "signed", 760 => "signed_uuid",
-            761..=763 => "optional_uuid", 764..=775 => "uuid", _ => return Err(Error::Unsupported),
+            761..=763 => "optional_uuid", 764..=776 => "uuid",
+            777..=i32::MAX => cfg.future_login_schema.as_str(),
+            _ => return Err(Error::Unsupported),
         },
-    })
+    };
+    match schema {
+        "legacy" | "signed" | "signed_uuid" | "optional_uuid" | "uuid" | "backend" => Ok(schema),
+        _ => Err(Error::Unsupported),
+    }
 }
 pub fn login_max(version: i32, cfg: &Protocol) -> Result<usize, Error> {
     // Bounds mirror the accepted schemas, including the full signed-key blobs.
+    if login_schema(version, cfg)? == "backend" { return Ok(cfg.max_frame); }
     let extra = match login_schema(version,cfg)? {
         "legacy" => 0, "signed" => 1+8+5+4096+5+4096,
         "signed_uuid" => 1+8+5+4096+5+4096+17,
@@ -161,6 +169,10 @@ pub fn login(data: &[u8], version: i32, cfg: &Protocol) -> Result<(), Error> {
     let schema = login_schema(version,cfg)?;
     let mut c = Cursor::new(data);
     if c.int()? != 0 { return Err(Error::Invalid); }
+    // In backend mode the proxy owns the wire-format compatibility check.
+    // We still require a Login Start packet id and rely on max_frame and the
+    // phase deadline to keep opaque future payloads bounded before relaying.
+    if schema == "backend" { return Ok(()); }
     let name = c.string(64)?;
     if name.is_empty() || name.encode_utf16().count() > 16 || name.chars().any(char::is_control) ||
         (cfg.strict_username && !name.bytes().all(|x| x.is_ascii_alphanumeric() || x == b'_')) {
@@ -195,9 +207,10 @@ pub fn status_handshake(host: &str, port: u16, version: i32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn cfg() -> Protocol { Protocol { max_frame: 16384, max_initial_bytes: 32768,
+    fn cfg() -> Protocol { Protocol { min_protocol: 4, max_protocol: i32::MAX, max_frame: 16384, max_initial_bytes: 32768,
         max_host_bytes: 1024, allow_host_suffix: true, allowed_hosts: vec![],
-        allowed_ports: vec![], strict_username: false, login_schemas: Default::default() } }
+        allowed_ports: vec![], strict_username: false, login_schemas: Default::default(),
+        future_login_schema: "uuid".into() } }
     #[test] fn varints() {
         for n in [0, 1, 127, 128, 255, i32::MAX, -1, i32::MIN] {
             let mut b = vec![]; put_varint(n, &mut b);
@@ -209,18 +222,51 @@ mod tests {
             assert_eq!(varint(&b), Err(Error::VarInt));
         }
     }
+    #[test] fn configured_release_range_checks_every_layout_and_both_boundaries() {
+        let config: crate::config::Config = serde_json::from_str(include_str!("../../config/gate.json")).unwrap();
+        let mut c = config.protocol;
+        assert_eq!((c.min_protocol,c.max_protocol),(757,776));
+        for version in 757..=776 {
+            let mut body=vec![0,1,b'a'];
+            match version {
+                757..=758 => {}, 759 => body.push(0),
+                760 => body.extend([0,0]), 761..=763 => body.push(0),
+                _ => body.extend([0;16]),
+            }
+            assert!(login(&body,version,&c).is_ok(), "{version}");
+        }
+        c.login_schemas.insert(756,"legacy".into());
+        c.login_schemas.insert(777,"uuid".into());
+        for version in [756,777] {
+            assert_eq!(login_max(version,&c),Err(Error::Unsupported));
+        }
+        let wire=status_handshake("localhost",25565,-1);
+        let (_,offset)=varint(&wire).unwrap().unwrap();
+        assert!(handshake(&wire[offset..],&c).is_ok());
+    }
     #[test] fn handshake_and_login_schemas() {
         let wire = status_handshake("localhost\0FML3\0", 25565, -1);
         let (_, off) = varint(&wire).unwrap().unwrap();
         assert_eq!(handshake(&wire[off..], &cfg()).unwrap().state, 1);
-        for (v, tail) in [(47, vec![]), (759, vec![0]), (760, vec![0,0]),
+        for (v, tail) in [(47, vec![]), (757, vec![]), (758, vec![]), (759, vec![0]), (760, vec![0,0]),
                           (761, vec![0]), (764, vec![0;16]), (770, vec![0;16]),
-                          (774, vec![0;16]), (775, vec![0;16])] {
+                          (774, vec![0;16]), (775, vec![0;16]), (776, vec![0;16])] {
             let mut b = vec![0,3,b'a',b'b',b'c']; b.extend(tail);
             assert!(login(&b, v, &cfg()).is_ok());
             b.push(0); assert!(login(&b, v, &cfg()).is_err());
         }
-        assert_eq!(login(&[0,1,b'a'], 9999, &cfg()), Err(Error::Unsupported));
+        assert_eq!(login(&[0,1,b'a'], 9999, &cfg()), Err(Error::Invalid));
+        let mut future = vec![0,1,b'a']; future.extend([0;16]);
+        assert!(login(&future,9999,&cfg()).is_ok());
+        let mut backend=cfg(); backend.future_login_schema="backend".into();
+        assert!(login(&[0,1,b'a',7,7,7],9999,&backend).is_ok());
+        assert_eq!(login_max(9999,&backend),Ok(backend.max_frame));
+        let mut disabled=cfg(); disabled.future_login_schema="disabled".into();
+        assert_eq!(login(&future,9999,&disabled),Err(Error::Unsupported));
+        let mut bounded=cfg(); bounded.max_protocol=775;
+        assert_eq!(login(&future,9999,&bounded),Err(Error::Unsupported));
+        bounded.max_protocol=9999;
+        assert!(login(&future,9999,&bounded).is_ok());
         let mut custom=cfg(); custom.login_schemas.insert(9999,"legacy".into());
         assert!(login(&[0,1,b'a'],9999,&custom).is_ok());
         assert!(status_request(&[0,0]).is_err());
@@ -255,7 +301,7 @@ mod tests {
         let (_,offset)=varint(&h).unwrap().unwrap();
         assert!(handshake(&h[offset..],&c).is_ok());
         assert!(h.len()-offset<=handshake_max(&c));
-        for version in [47,759,760,761,764] {
+        for version in [47,757,758,759,760,761,764,776] {
             // 16 three-byte UTF-8 characters are valid in non-strict mode.
             let name="\u{754c}".repeat(16);
             let mut b=vec![0]; put_varint(name.len() as i32,&mut b); b.extend(name.as_bytes());
@@ -264,13 +310,13 @@ mod tests {
                 for _ in 0..2 { put_varint(4096,&mut b); b.extend([7;4096]); }
             }
             if version==760 || version==761 { b.push(1); b.extend([0;16]); }
-            if version==764 { b.extend([0;16]); }
+            if version==764 || version==776 { b.extend([0;16]); }
             assert!(login(&b,version,&c).is_ok());
             assert!(b.len()<=login_max(version,&c).unwrap());
         }
         let mut custom=c.clone(); custom.login_schemas.insert(9999,"signed_uuid".into());
         assert_eq!(login_max(9999,&custom),login_max(760,&c));
-        assert_eq!(login_max(9999,&c),Err(Error::Unsupported));
+        assert_eq!(login_max(9999,&c),Ok(login_max(764,&c).unwrap()));
     }
     #[tokio::test] async fn phase_length_rejection_never_reads_the_body() {
         for max in [1,9,handshake_max(&cfg()),login_max(47,&cfg()).unwrap()] {
