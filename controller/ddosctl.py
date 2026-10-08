@@ -108,7 +108,11 @@ class Controller:
         current.update(host_pressure())
         self.snapshot = copy.deepcopy(current)
         try:
-            current.update(self.gate_counters())
+            gate = self.gate_counters()
+            current.update(gate)
+            # Keep the raw Gate counters visible in 'ddosctl stats' while
+            # preserving the existing flat XDP counter contract.
+            self.snapshot["gate_counters"] = gate
             self.snapshot["gate_metrics_available"] = True
             self.snapshot["gate_runtime_generation"] = current.get("runtime_generation",0)
             self.snapshot["gate_runtime_rejected_reads"] = current.get("runtime_rejected_reads",0)
