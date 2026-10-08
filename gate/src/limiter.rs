@@ -120,10 +120,6 @@ impl Limiter {
         if allowed || p.exempt { return true; }
         if p.observe { self.metrics.inc(27); true } else { self.metrics.inc(reason); false }
     }
-    pub fn global(&self, event: Event, p: Policy) -> bool {
-        let allowed = self.global.lock().unwrap()[event as usize].take(Instant::now(), self.cfg.mode_multipliers[p.mode], self.cfg.preserve_burst);
-        self.judged(allowed, 16, Policy { exempt: false, ..p })
-    }
     pub fn accept(self: &Arc<Self>, ip: IpAddr, p: Policy) -> Option<Ticket> {
         let ip = normalize(ip); let prefix = subnet(ip, self.cfg.ipv4_prefix, self.cfg.ipv6_prefix);
         let now = Instant::now();
@@ -148,10 +144,17 @@ impl Limiter {
         let ip_ok = i.buckets[0].available(now, factor, self.cfg.preserve_burst) && now >= i.penalty_until;
         let prefix_ok = net.buckets[0].available(now, factor, self.cfg.preserve_burst) && now >= net.penalty_until;
         if !self.judged(ip_ok, 14, p) || !self.judged(prefix_ok, 15, p) { return None; }
+        // Do not burn global admission credits on identities already blocked
+        // by source/prefix budgets or per-source resource safety caps.
+        // Consistent lock order: IP -> prefix -> global (as in event()).
+        let mut global = self.global.lock().unwrap();
+        let global_ok = global[Event::Connect as usize].available(now, factor, self.cfg.preserve_burst);
+        if !self.judged(global_ok, 16, Policy { exempt: false, ..p }) { return None; }
         if !p.exempt {
             if ip_ok { i.buckets[0].consume(); }
             if prefix_ok { net.buckets[0].consume(); }
         }
+        if global_ok { global[Event::Connect as usize].consume(); }
         i.active += 1; net.active += 1; i.pending += 1; net.pending += 1;
         Some(Ticket { limiter: self.clone(), ip, prefix, handshake: false, admitted: false,
             status_complete: false, server_rejected: false, status: false })
@@ -267,6 +270,22 @@ mod tests {
         t.handshake=true; t.mark_admitted(); drop(t); assert_eq!(m.get(22),0);
         let mut t=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
         t.handshake=true; drop(t); assert_eq!(m.get(22),1);
+    }
+    #[test] fn rejected_source_cannot_spend_shared_connect_tokens() {
+        let mut cfg=config();
+        cfg.connections_ip=1;
+        cfg.global.connect=Rate {per_second:0.001,burst:2.0};
+        let l=Limiter::new(cfg,Arc::new(Metrics::new()));
+        let p=Policy {mode:0,observe:false,exempt:false};
+        let first=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
+        // These are rejected by the IP concurrency cap before touching
+        // shared global credits. They cannot starve a different source.
+        for _ in 0..20 { assert!(l.accept(first.ip,p).is_none()); }
+        let second=l.accept("192.0.2.2".parse().unwrap(),p);
+        assert!(second.is_some());
+        // The two successful clients legitimately exhausted global credits.
+        assert!(l.accept("192.0.2.3".parse().unwrap(),p).is_none());
+        drop(first); drop(second);
     }
     #[test] fn rejected_ip_cannot_spend_shared_login_tokens() {
         let mut cfg=config();
