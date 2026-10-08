@@ -31,6 +31,24 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(self.cfg["owned_prefixes"],[])
         self.assertTrue(all(x["rate"] == 0 for x in self.cfg["syn_per_cpu"].values()))
 
+    def test_history_settings_are_optional_for_existing_installs(self):
+        self.cfg.pop("history_file", None)
+        self.cfg.pop("history_retention_days", None)
+        validate(self.cfg)
+        self.cfg["history_file"] = "/var/lib/xddp/history.sqlite3"
+        self.cfg["history_retention_days"] = 90
+        validate(self.cfg)
+        for path in ("/tmp/outside.sqlite3", "/var/lib/xddp/../outside.sqlite3"):
+            cfg = copy.deepcopy(self.cfg)
+            cfg["history_file"] = path
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                validate(cfg)
+        for retention in (0, 366, True, "30"):
+            cfg = copy.deepcopy(self.cfg)
+            cfg["history_retention_days"] = retention
+            with self.subTest(retention=retention), self.assertRaises(ValueError):
+                validate(cfg)
+
     def test_invalid_configs(self):
         mutations = [lambda c:c.update(observe="false"),lambda c:c.update(interface="docker0"),
                      lambda c:c.update(drop_tcp_ports=[25565]),lambda c:c.update(pin_dir="/sys/fs/bpf/../x"),
