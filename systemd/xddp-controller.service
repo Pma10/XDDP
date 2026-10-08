@@ -2,6 +2,8 @@
 Description=XDDP leased XDP controller (no automatic attachment)
 After=network.target
 RequiresMountsFor=/sys/fs/bpf
+Requires=xddp-bpffs.service
+After=xddp-bpffs.service
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
