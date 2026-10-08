@@ -120,7 +120,9 @@ class XDPTests(unittest.TestCase):
         for index,value in ((46,0x40),(46,0xf0),(47,3),(47,6),(47,5)):
             data = bytearray(tcp()); data[index]=value
             self.assertEqual(self.run_packet(data),1)
-        bad_version = bytearray(tcp()); bad_version[14]=0x44
+        bad_ihl = bytearray(tcp()); bad_ihl[14]=0x44
+        self.assertEqual(self.run_packet(bad_ihl),1)
+        bad_version = bytearray(tcp()); bad_version[14]=0x54
         self.assertEqual(self.run_packet(bad_version),2)
 
     def test_unowned_malformed_packets_never_drop_unrelated_traffic(self):
