@@ -192,6 +192,24 @@ class XDPTests(unittest.TestCase):
         ext=bytearray(v6); ext[20]=0
         self.assertEqual(self.run_packet(ext),2) # explicit extension-chain deferral
 
+    def test_malformed_ipv6_only_enforced_for_owned_enabled_destination(self):
+        import ipaddress
+        src = ipaddress.IPv6Address("2001:db8::7").packed
+        owned = ipaddress.IPv6Address("2001:db8::10").packed
+        foreign = ipaddress.IPv6Address("2001:db8::11").packed
+        # Payload length claims more bytes than the frame contains; the fixed
+        # 40-byte IPv6 header still gives us a trustworthy destination key.
+        raw = bytes(12) + b"\x86\xdd" + struct.pack("!IHBB16s16s",
+            6 << 28, 40, 6, 64, src, owned) + tcp()[34:]
+        self.loader("prefix", self.pin, "owned", "add", "2001:db8::10/128", 1)
+        self.assertEqual(self.run_packet(raw), 1)
+        other = bytearray(raw)
+        other[38:54] = foreign
+        self.assertEqual(self.run_packet(other), 2)
+        self.loader("config",self.pin,time.monotonic_ns()+int(60e9),0,0,0,0,0,0,1)
+        self.assertEqual(self.run_packet(raw),2)
+        self.configure()
+
     def test_syn_budget_exempts_ack_and_has_no_dynamic_source_map(self):
         self.configure(rate=1,burst=1)
         results=[self.run_packet(tcp(flags=2)) for _ in range(32)]
