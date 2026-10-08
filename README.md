@@ -94,6 +94,8 @@ Start the controller only after editing installed configuration:
 sudo systemctl start xddp-controller
 sudo ddosctl status
 sudo ddosctl stats
+sudo ddosctl history 2026-10-06             # server-local day; offline SQLite archive
+sudo ddosctl history 2026-10-06 raw         # one-minute snapshots
 sudo ddosctl config show
 sudo ddosctl xdp status
 sudo ddosctl xdp attach                 # requires no existing attachment
@@ -119,6 +121,29 @@ remain in use. IPv6 direct TCP/UDP policies are available when enabled, but
 extension chains, jumbograms and IPv6 fragments are delegated to the kernel.
 There is no promise to defeat valid authenticated bot traffic or residual
 ACK floods with source-only heuristics. See [defensive review](docs/DEFENSIVE_REVIEW.md).
+
+## Historical telemetry and controller startup safety
+
+The controller archives a **single aggregate sample per minute** in
+`/var/lib/xddp/history.sqlite3` (30 days by default). It contains XDP and
+gate counters, sampled rates, defense mode and observation state. There are
+**no per-IP or per-packet logs**. `ddosctl history YYYY-MM-DD [raw]` reads the
+SQLite file directly even if the controller socket is down. Dates use the
+server's local timezone; a missing day/archive does **not** imply no attack.
+History begins only after the updated controller starts; old 2026-10-06
+traffic cannot be recovered from a new database.
+
+On systemd hosts a dedicated `xddp-bpffs.service` prepares only the bpffs
+directory. The controller uses `ProtectKernelTunables=no` (needed to write
+BPF pins) while retaining `ProtectSystem=strict` and a narrow
+`ReadWritePaths=/sys/fs/bpf/xddp` exception. Repeated startup failures are
+limited to five attempts in 60 seconds rather than an infinite restart storm.
+Check service drop-ins before upgrades: an old override granting write access
+to all of `/sys/fs/bpf` should be reviewed and removed when no longer needed.
+
+**Do not restart the gate on a live server merely to apply these changes.**
+Existing relays remain in the gate process; upgrading installed binaries with
+the repository installer requires an operator-planned maintenance window.
 
 ## Recovery
 
