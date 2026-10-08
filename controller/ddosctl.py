@@ -5,6 +5,7 @@ import copy
 import fcntl
 import ipaddress
 import json
+import sqlite3
 import os
 from pathlib import Path
 import signal
@@ -15,6 +16,7 @@ import time
 import urllib.request
 
 from core import Adaptive, MODES, rates, validate, bounded_json, runtime_document, host_pressure
+from history import DEFAULT_PATH, History, read_day
 
 
 def atomic(path, data, mode=0o644):
@@ -49,6 +51,8 @@ class Controller:
         self.snapshot, self.signals, self.mode = {}, {}, 0
         self.stopping = False
         self.generation = time.time_ns()
+        self.history = History(cfg.get("history_file", DEFAULT_PATH), cfg.get("history_retention_days", 30))
+        self.history_errors = 0
 
     def loader(self, *args):
         p = subprocess.run([self.cfg["loader"], *map(str, args)], capture_output=True,
@@ -116,6 +120,14 @@ class Controller:
         self.mode = mode if self.cfg["manual_mode"] == "auto" else MODES.index(self.cfg["manual_mode"])
         self.publish()
         self.lease()
+        # Archive only one aggregate snapshot per minute, after renewing the safety lease.
+        try:
+            self.history.record(int(time.time()), MODES[self.mode], self.cfg["observe"],
+                                current, self.signals, self.snapshot["gate_metrics_available"])
+        except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+            self.history_errors += 1
+            if self.history_errors <= 3:
+                print(f"XDDP history write failed: {exc}", file=sys.stderr)
         text = []
         for key, value in self.snapshot.items():
             if type(value) in (int,float):
@@ -124,7 +136,8 @@ class Controller:
             text.append(f'xddp_xdp_candidate_drop{{reason="{reason}"}} {count}')
         for name,value in self.signals.items():
             text.append(f"xddp_observed_{name} {value}")
-        text.extend([f"xddp_controller_mode {self.mode}", f"xddp_controller_observe {int(self.cfg['observe'])}",
+        text.extend([f"xddp_controller_history_write_errors {self.history_errors}",
+                     f"xddp_controller_mode {self.mode}", f"xddp_controller_observe {int(self.cfg['observe'])}",
                      f"xddp_controller_last_update_unix {int(time.time())}"])
         atomic(self.cfg["metrics_file"],"\n".join(text)+"\n")
 
@@ -266,6 +279,13 @@ def main():
         Controller(read_config(args.config),args.config).run(); return
     if not args.command:
         p.error("command required")
+    if args.command[0] == "history":
+        if len(args.command) not in (2, 3) or (len(args.command) == 3 and args.command[2] != "raw"):
+            p.error("usage: ddosctl history YYYY-MM-DD [raw]")
+        cfg = read_config(args.config)
+        print(json.dumps(read_day(cfg.get("history_file", DEFAULT_PATH), args.command[1],
+                                  raw=len(args.command) == 3), indent=2))
+        return
     with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
         client.settimeout(15); client.connect(args.socket)
         client.sendall((json.dumps(args.command)+"\n").encode())
