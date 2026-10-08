@@ -17,6 +17,7 @@ pub const NAMES: &[&str] = &[
     "status_source_limited",
     "relay_stall_timeouts", "half_close_timeouts", "backend_protection_rejected", "backend_circuit_opened",
     "client_idle_timeouts", "backend_dial_rate_limited",
+    "runtime_missing_reads",
 ];
 pub struct Metrics { values: Vec<AtomicU64> }
 impl Metrics {
