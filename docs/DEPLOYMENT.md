@@ -194,6 +194,16 @@ installed binaries/units. It retains config, user, logs and pins for recovery.
 Delete individual unreferenced pins only after confirming no attachment uses that
 generation. Never recursively remove a shared bpffs tree.
 
+## Metrics interpretation after recovery
+
+`xddp_gate_runtime_missing_reads` counts one-second polls where the controller
+runtime file does not exist (typically before controller startup or during
+outage). `xddp_gate_runtime_rejected_reads` now counts existing files that
+are invalid/unreadable or other filesystem errors. In both cases policy
+leases still expire to observation, so missing policy is not proof of an
+attack. `ddosctl stats` exposes a nested `gate_counters` snapshot with
+live Gate metrics, separately from flat XDP counters.
+
 ## Failure matrix
 
 | Failure | Result and operator action |
