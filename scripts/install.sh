@@ -30,6 +30,7 @@ install -m 0755 gate/target/release/xddp-gate "$dest/usr/local/bin/xddp-gate"
 install -m 0644 controller/core.py controller/ddosctl.py "$dest/usr/local/lib/xddp/controller/"
 install -m 0755 scripts/ddosctl "$dest/usr/local/sbin/ddosctl"
 install -m 0755 scripts/preflight.sh "$dest/usr/local/libexec/xddp-preflight"
+install -m 0755 scripts/prepare-bpffs.sh "$dest/usr/local/libexec/xddp-prepare-bpffs"
 install -m 0755 scripts/rollback.py "$dest/usr/local/sbin/xddp-rollback"
 for name in controller gate; do
     if [ ! -e "$dest/etc/xddp/$name.json" ] && [ ! -L "$dest/etc/xddp/$name.json" ]; then
