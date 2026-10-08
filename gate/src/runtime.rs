@@ -1,7 +1,7 @@
 use crate::limiter::{Policy, normalize};
 use ipnet::IpNet;
 use serde::Deserialize;
-use std::{io, net::IpAddr, sync::{Arc, RwLock, atomic::{AtomicU64,Ordering}}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
+use std::{collections::{BTreeMap,HashSet}, io, net::IpAddr, sync::{Arc, RwLock, atomic::{AtomicU64,Ordering}}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 use tokio::io::AsyncReadExt;
 
 const MAX_DOCUMENT_BYTES: usize = 262144;
@@ -9,7 +9,51 @@ const MAX_DOCUMENT_BYTES: usize = 262144;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Wire { generation: u64, expires_unix: u64, mode: usize, observe: bool, allow: Vec<IpNet>, block: Vec<IpNet> }
-struct Snapshot { wire: Wire, received: Instant }
+// Tiny ACLs are faster to scan; large ACLs should not require thousands of
+// linear CIDR comparisons on every incoming TCP connection.
+struct PrefixIndex {
+    small: Vec<IpNet>,
+    v4: Vec<(u32,HashSet<u32>)>,
+    v6: Vec<(u128,HashSet<u128>)>,
+}
+impl PrefixIndex {
+    fn new(nets:&[IpNet])->Self {
+        if nets.len()<=8 {
+            return Self {small:nets.to_vec(),v4:Vec::new(),v6:Vec::new()};
+        }
+        let mut v4:BTreeMap<u8,HashSet<u32>>=BTreeMap::new();
+        let mut v6:BTreeMap<u8,HashSet<u128>>=BTreeMap::new();
+        for net in nets {
+            match net {
+                IpNet::V4(v) => {v4.entry(v.prefix_len()).or_default().insert(u32::from(v.network()));},
+                IpNet::V6(v) => {v6.entry(v.prefix_len()).or_default().insert(u128::from(v.network()));},
+            }
+        }
+        Self {
+            small:Vec::new(),
+            v4:v4.into_iter().map(|(bits,values)| {
+                (u32::MAX.checked_shl(32-u32::from(bits)).unwrap_or(0),values)
+            }).collect(),
+            v6:v6.into_iter().map(|(bits,values)| {
+                (u128::MAX.checked_shl(128-u32::from(bits)).unwrap_or(0),values)
+            }).collect(),
+        }
+    }
+    fn contains(&self,ip:IpAddr)->bool {
+        if !self.small.is_empty() {return self.small.iter().any(|n|n.contains(&ip));}
+        match ip {
+            IpAddr::V4(v) => {
+                let raw=u32::from(v);
+                self.v4.iter().any(|(mask,nets)|nets.contains(&(raw & mask)))
+            }
+            IpAddr::V6(v) => {
+                let raw=u128::from(v);
+                self.v6.iter().any(|(mask,nets)|nets.contains(&(raw & mask)))
+            }
+        }
+    }
+}
+struct Snapshot { wire: Wire, received: Instant, allow_index:PrefixIndex, block_index:PrefixIndex }
 pub struct Runtime { value: RwLock<Option<Snapshot>>, default_observe: bool, rejected:AtomicU64, missing:AtomicU64 }
 impl Runtime {
     pub fn new(default_observe: bool) -> Arc<Self> { Arc::new(Self { value: RwLock::new(None), default_observe, rejected:AtomicU64::new(0), missing:AtomicU64::new(0) }) }
@@ -30,7 +74,9 @@ impl Runtime {
         let mut state=self.value.write().unwrap();
         if state.as_ref().map(|x|x.wire.generation)!=Some(w.generation) {
             // Explicit expired publications retire the previous policy immediately.
-            *state=Some(Snapshot {wire:w,received:Instant::now()});
+            let allow_index=PrefixIndex::new(&w.allow);
+            let block_index=PrefixIndex::new(&w.block);
+            *state=Some(Snapshot {wire:w,received:Instant::now(),allow_index,block_index});
         }
         true
     }
@@ -44,9 +90,9 @@ impl Runtime {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         if s.received.elapsed() > Duration::from_secs(15) || now >= s.wire.expires_unix { return default; }
         let ip = normalize(ip);
-        let exempt = s.wire.allow.iter().any(|n| n.contains(&ip));
+        let exempt = s.allow_index.contains(ip);
         let p = Policy { mode:s.wire.mode, observe:s.wire.observe, exempt };
-        (p, !p.observe && !exempt && s.wire.block.iter().any(|n| n.contains(&ip)))
+        (p, !p.observe && !exempt && s.block_index.contains(ip))
     }
     fn record_open_error(&self, kind: io::ErrorKind) {
         if kind == io::ErrorKind::NotFound {
@@ -93,11 +139,36 @@ impl Runtime {
         let r=Runtime::new(true); let ip="192.0.2.4".parse().unwrap();
         assert!(r.policy(ip).0.observe);
         let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        *r.value.write().unwrap()=Some(Snapshot {wire:Wire {generation:1,expires_unix:now+10,mode:3,observe:false,
-            allow:vec![],block:vec!["192.0.2.0/24".parse().unwrap()]},received:Instant::now()});
+        let wire=Wire {generation:1,expires_unix:now+10,mode:3,observe:false,
+            allow:vec![],block:vec!["192.0.2.0/24".parse().unwrap()]};
+        let allow_index=PrefixIndex::new(&wire.allow); let block_index=PrefixIndex::new(&wire.block);
+        *r.value.write().unwrap()=Some(Snapshot {wire,received:Instant::now(),allow_index,block_index});
         assert!(r.policy(ip).1); assert_eq!(r.policy(ip).0.mode,3);
         r.value.write().unwrap().as_mut().unwrap().received=Instant::now()-Duration::from_secs(16);
         let (p,blocked)=r.policy(ip); assert!(p.observe); assert_eq!(p.mode,0); assert!(!blocked);
+    }
+    #[test] fn indexed_cidrs_match_linear_ipv4_ipv6_and_overlap() {
+        let mut nets=vec!["0.0.0.0/0".parse::<IpNet>().unwrap(),
+            "192.0.2.0/24".parse().unwrap(),"2001:db8::/32".parse().unwrap(),
+            "2001:db8:1::/48".parse().unwrap(), "::1/128".parse().unwrap()];
+        for n in 1..20 {
+            nets.push(format!("198.51.{}.0/24",n).parse().unwrap());
+            nets.push(format!("2001:db8:{:x}::/48",n+200).parse().unwrap());
+        }
+        let matcher=PrefixIndex::new(&nets);
+        for ip in ["192.0.2.1", "203.0.113.3", "::1",
+                   "2001:db8:1::7", "2001:db8:cafe::1", "2001:4860::1"] {
+            let ip=ip.parse::<IpAddr>().unwrap();
+            assert_eq!(matcher.contains(ip),nets.iter().any(|n|n.contains(&ip)), "{ip}");
+        }
+        let no_match=PrefixIndex::new(&["2001:db8::/32".parse().unwrap(),
+            "2001:db8:1::/48".parse().unwrap(),"::1/128".parse().unwrap()]);
+        assert!(!no_match.contains("192.0.2.1".parse().unwrap()));
+        let universal=PrefixIndex::new(&["::/0".parse().unwrap()]);
+        assert!(universal.contains("2001:4860::1".parse().unwrap()));
+        let small=PrefixIndex::new(&["192.0.2.0/24".parse().unwrap()]);
+        assert!(small.contains("192.0.2.40".parse().unwrap()));
+        assert!(!small.contains("192.0.3.1".parse().unwrap()));
     }
     #[test] fn missing_policy_file_is_not_invalid_policy() {
         let r=Runtime::new(true);
@@ -110,8 +181,10 @@ impl Runtime {
     #[test] fn allow_precedes_block() {
         let r=Runtime::new(true); let ip="192.0.2.4".parse().unwrap();
         let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        *r.value.write().unwrap()=Some(Snapshot {wire:Wire {generation:1,expires_unix:now+10,mode:2,observe:false,
-            allow:vec!["192.0.2.4/32".parse().unwrap()],block:vec!["192.0.2.0/24".parse().unwrap()]},received:Instant::now()});
+        let wire=Wire {generation:1,expires_unix:now+10,mode:2,observe:false,
+            allow:vec!["192.0.2.4/32".parse().unwrap()],block:vec!["192.0.2.0/24".parse().unwrap()]};
+        let allow_index=PrefixIndex::new(&wire.allow); let block_index=PrefixIndex::new(&wire.block);
+        *r.value.write().unwrap()=Some(Snapshot {wire,received:Instant::now(),allow_index,block_index});
         let (p,blocked)=r.policy(ip); assert!(p.exempt); assert!(!blocked);
     }
 }
