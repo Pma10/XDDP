@@ -122,6 +122,24 @@ extension chains, jumbograms and IPv6 fragments are delegated to the kernel.
 There is no promise to defeat valid authenticated bot traffic or residual
 ACK floods with source-only heuristics. See [defensive review](docs/DEFENSIVE_REVIEW.md).
 
+## XDP and Gate hardening
+
+- **Scoped malformed-packet enforcement:** XDP enforces malformed IP and
+  transport decisions only when the destination is confirmed within
+  `owned_prefixes`; short Ethernet headers and unowned destinations pass.
+  IPv6 rules are enforced only when explicitly enabled. This protects
+  unrelated traffic on shared Docker/Tailscale/routed interfaces.
+- **Status frame limits:** the cached Minecraft status response budget includes
+  packet ID and both VarInt lengths, including 16KiB+ JSON responses.
+- **CIDR lookup:** small allow/block ACLs retain linear lookups. Larger ACLs
+  use prefix-length-indexed IPv4/IPv6 hash sets instead of scanning 4096+
+  prefixes at every connection. Matching semantics and allow precedence are
+  verified in Rust tests; production throughput is not yet benchmarked.
+- **Gate diagnostics:** `ddosctl stats` now includes `gate_counters`; the
+  Gate separately exposes `runtime_missing_reads` (missing file) and
+  `runtime_rejected_reads` (invalid/unreadable file). These are health
+  signals, **not** proof of a DDoS attack.
+
 ## Historical telemetry and controller startup safety
 
 The controller archives a **single aggregate sample per minute** in
