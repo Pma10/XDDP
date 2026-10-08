@@ -135,6 +135,10 @@ ACK floods with source-only heuristics. See [defensive review](docs/DEFENSIVE_RE
   use prefix-length-indexed IPv4/IPv6 hash sets instead of scanning 4096+
   prefixes at every connection. Matching semantics and allow precedence are
   verified in Rust tests; production throughput is not yet benchmarked.
+- **Admission fairness:** global connection-rate tokens are committed only
+  after per-IP, prefix and capacity checks succeed, preventing a rejected
+  abusive source from exhausting healthy players' shared connect budget.
+  Newly rejected identities/prefixes are not retained in bounded maps.
 - **Gate diagnostics:** `ddosctl stats` now includes `gate_counters`; the
   Gate separately exposes `runtime_missing_reads` (missing file) and
   `runtime_rejected_reads` (invalid/unreadable file). These are health
