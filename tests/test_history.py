@@ -23,17 +23,20 @@ class HistoryTests(unittest.TestCase):
     def test_one_record_per_minute_and_offline_hourly_deltas(self):
         h = History(self.path)
         a = self.start + 60
-        first = {"rx_packets": 100, "drop_packets": 10, "handshake_invalid": 2}
+        first = {"rx_packets": 100, "drop_packets": 10, "handshake_invalid": 2,
+                 "candidate_reasons": {"syn_rate": 7}}
         self.assertTrue(h.record(a, "normal", True, first, {"pps": 10}, True))
         self.assertFalse(h.record(a + 5, "normal", True, first, {"pps": 20}, True))
         self.assertTrue(h.record(a + 60, "attack", False,
-                                 {"rx_packets": 150, "drop_packets": 16, "handshake_invalid": 3},
+                                 {"rx_packets": 150, "drop_packets": 16, "handshake_invalid": 3,
+                                  "candidate_reasons": {"syn_rate": 12}},
                                  {"pps": 25}, True))
         result = read_day(self.path, str(self.day), raw=True)
         self.assertEqual(result["samples"], 2)
         hour = result["hours"][0]
         self.assertEqual(hour["deltas"]["rx_packets"], 50)
         self.assertEqual(hour["deltas"]["drop_packets"], 6)
+        self.assertEqual(hour["candidate_deltas"]["syn_rate"], 5)
         self.assertEqual(hour["max_sampled_rates"]["pps"], 25)
         self.assertEqual(hour["modes"], ["normal", "attack"])
         self.assertEqual(len(result["raw_samples"]), 2)
