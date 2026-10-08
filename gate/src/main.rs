@@ -64,8 +64,9 @@ async fn run(cfg:Config) -> Result<(),Box<dyn std::error::Error>> {
         loop { maintenance.limiter.sweep(shard); shard = (shard+1)%64;
             let (p,_) = maintenance.runtime.policy(maintenance.cfg.listen.ip());
             maintenance.metrics.set(34,p.mode as u64); maintenance.metrics.set(35,u64::from(p.observe));
-            let (generation,rejected)=maintenance.runtime.telemetry();
+            let (generation,rejected,missing)=maintenance.runtime.telemetry();
             maintenance.metrics.set(42,generation); maintenance.metrics.set(43,rejected);
+            maintenance.metrics.set(51,missing);
             tokio::time::sleep(Duration::from_millis(100)).await; }
     });
     eprintln!("xddp-gate ready on {}; observation={}",s.cfg.listen,s.runtime.policy(s.cfg.listen.ip()).0.observe);
