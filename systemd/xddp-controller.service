@@ -2,6 +2,8 @@
 Description=XDDP leased XDP controller (no automatic attachment)
 After=network.target
 RequiresMountsFor=/sys/fs/bpf
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -22,7 +24,7 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ProtectKernelTunables=yes
+ProtectKernelTunables=no
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
