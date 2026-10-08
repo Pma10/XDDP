@@ -89,7 +89,7 @@ def read_day(path, date_text, raw=False):
             samples.append({"ts": ts, "mode": mode, "observe": bool(observe),
                             "gate_metrics_available": bool(available), "counters": counts, "signals": signals})
         last_ts, last_counts = ts, counts
-    output = {"date": date_text, "timezone": time.tzname[time.daylight if time.daylight else 0],
+    output = {"date": date_text, "timezone": time.strftime("%Z", time.localtime(start)),
               "samples": len(rows), "resolution_seconds": 60,
               "note": "Deltas omit gaps over 90 seconds and counter resets; sampled rates are not whole-minute peaks.",
               "hours": list(hours.values())}
