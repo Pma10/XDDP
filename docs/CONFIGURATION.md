@@ -300,6 +300,33 @@ numbers cannot create cache entries or trigger backend polls. RGB components,
 custom fields and favicon are preserved as JSON values. The maximum response
 limit reserves space for any nonnegative i32 protocol before publishing a refresh.
 
+## Historical archive (optional settings)
+
+The controller samples XDP + gate cumulative counters and derived one-second
+rates once per minute, storing one SQLite row per minute in
+`/var/lib/xddp/history.sqlite3`. The systemd controller unit creates a
+root-owned persistent `/var/lib/xddp` StateDirectory (mode 0700). A missing
+file is **not** a zero-traffic observation. Historical telemetry is not
+backfilled from journal logs or from the gate's live cumulative counters.
+
+- `history_file`: optional absolute path under `/var/lib/xddp/`, defaults to
+  `/var/lib/xddp/history.sqlite3`. An empty string disables writing.
+- `history_retention_days`: optional integer 1–365, defaults to 30.
+  Records older than the retention window are pruned daily.
+- `ddosctl history YYYY-MM-DD`: hourly summaries for the server's local day,
+  including sampled PPS/BPS and interval counter deltas.
+- `ddosctl history YYYY-MM-DD raw`: original minute snapshots including
+  `gate_metrics_available`, mode, observe, counters and rates.
+
+Deltas skip counter resets and missing intervals greater than 90 seconds;
+sampled instantaneous rates are **not** exact per-minute maxima or historic
+attack capacity. Because the DB stores aggregate counters only, there are no
+individual IP logs. On database errors the controller continues renewing
+the safety lease and increments `xddp_controller_history_write_errors` in
+`/run/xddp/xdp.prom`. Archive write attempts are limited to one per minute.
+Avoid placing the database on an unbounded network filesystem or exposing
+its filesystem path over HTTP.
+
 ## Metrics
 
 Gate Prometheus: `http://127.0.0.1:9109/metrics`; fixed metric names and no client
