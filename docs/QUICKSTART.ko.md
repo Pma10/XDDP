@@ -62,6 +62,17 @@ sudo ddosctl xdp attach
 NAT의 실제 상태 조회 동시량을 확인한 뒤에만 설정합니다. 속도와 burst 값은
 실측값으로 정하고, 샘플의 0 값은 제한이 꺼진 상태입니다.
 
+## XDP 대상 구분과 Gate 통계
+
+XDP는 패킷의 목적지가 `owned_prefixes`에 있는지 확인한 뒤에만
+비정상 IP 헤더의 차단을 적용합니다. 대상 주소를 확정할 수 없거나
+비보호 대상인 트래픽은 통과시켜 Docker/Tailscale/기타 서비스를
+잘못 차단할 위험을 줄였습니다. `ddosctl stats`는
+`gate_counters` 필드에 Gate 누적 지표도 표시합니다.
+`runtime_missing_reads`는 컨트롤러 런타임 파일이 없는 횟수이고,
+`runtime_rejected_reads`는 존재하는 파일이 잘못됐거나 읽기 실패한 횟수입니다.
+서비스 장애를 곧바로 DDoS 탐지로 해석하지 마십시오.
+
 ## 로그와 날짜별 공격 통계
 
 ```sh
