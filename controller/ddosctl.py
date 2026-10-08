@@ -116,6 +116,7 @@ class Controller:
             self.snapshot["gate_metrics_available"] = True
             self.snapshot["gate_runtime_generation"] = current.get("runtime_generation",0)
             self.snapshot["gate_runtime_rejected_reads"] = current.get("runtime_rejected_reads",0)
+            self.snapshot["gate_runtime_missing_reads"] = current.get("runtime_missing_reads",0)
         except (OSError, ValueError, UnicodeError):
             self.snapshot["gate_metrics_available"] = False
         self.signals = rates(self.previous,current,now-self.previous_time)
@@ -157,7 +158,8 @@ class Controller:
                         gate_metrics_available=self.snapshot.get("gate_metrics_available",False),
                         published_generation=self.generation,
                         gate_runtime_generation=self.snapshot.get("gate_runtime_generation"),
-                        gate_runtime_rejected_reads=self.snapshot.get("gate_runtime_rejected_reads"))
+                        gate_runtime_rejected_reads=self.snapshot.get("gate_runtime_rejected_reads"),
+                        gate_runtime_missing_reads=self.snapshot.get("gate_runtime_missing_reads"))
         if args == ["stats"]:
             return self.snapshot
         if args == ["config","show"]:
