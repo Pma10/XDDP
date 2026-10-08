@@ -134,10 +134,16 @@ impl Limiter {
         // with addresses that were never admitted.
         let new_ip = !ips.contains_key(&ip);
         let new_prefix = !prefixes.contains_key(&prefix);
-        let mut provisional_ip = Entry::new(&self.cfg.ip, now);
-        let mut provisional_prefix = Entry::new(&self.cfg.prefix, now);
-        let i = ips.get_mut(&ip).unwrap_or(&mut provisional_ip);
-        let net = prefixes.get_mut(&prefix).unwrap_or(&mut provisional_prefix);
+        let mut provisional_ip = new_ip.then(|| Entry::new(&self.cfg.ip, now));
+        let mut provisional_prefix = new_prefix.then(|| Entry::new(&self.cfg.prefix, now));
+        let i = match ips.get_mut(&ip) {
+            Some(existing) => existing,
+            None => provisional_ip.as_mut().expect("new identity"),
+        };
+        let net = match prefixes.get_mut(&prefix) {
+            Some(existing) => existing,
+            None => provisional_prefix.as_mut().expect("new prefix"),
+        };
         i.touched = now; net.touched = now;
         if (self.cfg.connections_ip > 0 && i.active >= self.cfg.connections_ip) ||
            (self.cfg.connections_prefix > 0 && net.active >= self.cfg.connections_prefix) {
@@ -162,13 +168,14 @@ impl Limiter {
             if prefix_ok { net.buckets[0].consume(); }
         }
         if global_ok { global[Event::Connect as usize].consume(); }
+        drop(global);
         i.active += 1; net.active += 1; i.pending += 1; net.pending += 1;
         if new_ip {
-            ips.insert(ip, provisional_ip);
+            ips.insert(ip, provisional_ip.take().expect("provisional IP"));
             self.metrics.inc(28); self.metrics.inc(32);
         }
         if new_prefix {
-            prefixes.insert(prefix, provisional_prefix);
+            prefixes.insert(prefix, provisional_prefix.take().expect("provisional prefix"));
             self.metrics.inc(29); self.metrics.inc(33);
         }
         Some(Ticket { limiter: self.clone(), ip, prefix, handshake: false, admitted: false,
