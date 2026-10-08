@@ -293,7 +293,7 @@ mod tests {
         let p=Policy {mode:0,observe:false,exempt:false};
         let held=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
         for n in 1..=100 {
-            let ip=IpAddr::V4(Ipv4Addr::from(0xc6336400u32+n));
+            let ip=IpAddr::V4(Ipv4Addr::from(0xcb007100u32+n));
             assert!(l.accept(ip,p).is_none());
         }
         assert_eq!(m.get(32),1,"rejected IPs must not retain identity entries");
