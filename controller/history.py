@@ -71,7 +71,7 @@ def read_day(path, date_text, raw=False):
         signals = json.loads(signals_json)
         hour = time.strftime("%Y-%m-%d %H:00", time.localtime(ts))
         entry = hours.setdefault(hour, {"hour": hour, "samples": 0, "deltas": {},
-                                        "max_sampled_rates": {}, "modes": []})
+                                        "candidate_deltas": {}, "max_sampled_rates": {}, "modes": []})
         entry["samples"] += 1
         if mode not in entry["modes"]:
             entry["modes"].append(mode)
@@ -81,6 +81,14 @@ def read_day(path, date_text, raw=False):
                 a, b = last_counts.get(key), counts.get(key)
                 if type(a) is int and type(b) is int and b >= a:
                     entry["deltas"][key] = entry["deltas"].get(key, 0) + b - a
+            prior_reasons = last_counts.get("candidate_reasons", {})
+            reasons = counts.get("candidate_reasons", {})
+            if isinstance(prior_reasons, dict) and isinstance(reasons, dict):
+                for reason, value in reasons.items():
+                    old = prior_reasons.get(reason)
+                    if type(value) is int and type(old) is int and value >= old:
+                        candidate = entry["candidate_deltas"]
+                        candidate[reason] = candidate.get(reason, 0) + value - old
         for key in ("pps", "bps", "syn_per_second", "accepts_per_second", "resource_limited_per_second"):
             value = signals.get(key)
             if isinstance(value, (float, int)) and not isinstance(value, bool):
