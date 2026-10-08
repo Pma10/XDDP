@@ -121,6 +121,22 @@ class ControllerIOTests(unittest.TestCase):
         self.assertEqual(self.config_path.read_text(),original)
         self.assertFalse(self.controller.stopping)
 
+    def test_history_disk_error_does_not_interrupt_policy_lease(self):
+        def fake_loader(*args):
+            self.calls.append(args)
+            if args[0] == "stats":
+                return {"candidate_reasons": {}, "rx_packets": 100}
+            return {}
+        self.controller.loader = fake_loader
+        with patch.object(self.controller, "gate_counters", return_value={}), \
+             patch.object(self.controller.history, "record", side_effect=OSError("disk full")), \
+             patch("ddosctl.sys.stderr"):
+            self.controller.tick()
+        self.assertEqual(self.controller.history_errors, 1)
+        self.assertTrue(any(call[0] == "config" for call in self.calls))
+        self.assertTrue(Path(self.controller.cfg["metrics_file"]).exists())
+        self.assertFalse(self.controller.stopping)
+
     def test_runtime_generation_metric_keeps_full_integer_precision(self):
         generation=18446744073709551000
         with patch("ddosctl.urllib.request.build_opener") as build:
