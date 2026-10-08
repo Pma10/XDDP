@@ -95,7 +95,17 @@ int xddp(struct xdp_md *ctx)
     __u64 now = bpf_ktime_get_ns();
     struct packet p = {};
     int r = parse_ip(d, end, &p);
-    if (r) return result(s, c, r < 0 ? -r : 0, now);
+    if (r) {
+        /* Never enforce malformed L2/IP against traffic whose destination is
+         * not provably owned. This interface may also carry routed/overlay
+         * and unrelated host traffic. A validated fixed IP header is enough
+         * to establish ownership even when its length fields are malformed. */
+        if (r < 0 && c && c->abi == XDDP_ABI && p.dst.family &&
+            (p.dst.family != 6 || c->ipv6) &&
+            bpf_map_lookup_elem(&owned, &p.dst))
+            return result(s, c, -r, now);
+        return result(s, c, 0, now);
+    }
     if (p.proto == 1 || p.proto == 58) {
         s->icmp_packets++;
         return result(s, c, 0, now);
