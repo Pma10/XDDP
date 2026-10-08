@@ -76,7 +76,7 @@ def validate(cfg):
     history_path = cfg.get("history_file", "/var/lib/xddp/history.sqlite3")
     if (not isinstance(history_path, str) or (history_path and
             (not history_path.startswith("/var/lib/xddp/") or
-             ".." in history_path.split("/") or "\\0" in history_path))):
+             ".." in history_path.split("/") or "\0" in history_path))):
         raise ValueError("history_file must be disabled or under /var/lib/xddp/")
     retention = cfg.get("history_retention_days", 30)
     if type(retention) is not int or not 1 <= retention <= 365:
