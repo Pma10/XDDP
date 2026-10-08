@@ -1,7 +1,7 @@
 use crate::limiter::{Policy, normalize};
 use ipnet::IpNet;
 use serde::Deserialize;
-use std::{net::IpAddr, sync::{Arc, RwLock, atomic::{AtomicU64,Ordering}}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
+use std::{io, net::IpAddr, sync::{Arc, RwLock, atomic::{AtomicU64,Ordering}}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 use tokio::io::AsyncReadExt;
 
 const MAX_DOCUMENT_BYTES: usize = 262144;
@@ -10,15 +10,15 @@ const MAX_DOCUMENT_BYTES: usize = 262144;
 #[serde(deny_unknown_fields)]
 struct Wire { generation: u64, expires_unix: u64, mode: usize, observe: bool, allow: Vec<IpNet>, block: Vec<IpNet> }
 struct Snapshot { wire: Wire, received: Instant }
-pub struct Runtime { value: RwLock<Option<Snapshot>>, default_observe: bool, rejected:AtomicU64 }
+pub struct Runtime { value: RwLock<Option<Snapshot>>, default_observe: bool, rejected:AtomicU64, missing:AtomicU64 }
 impl Runtime {
-    pub fn new(default_observe: bool) -> Arc<Self> { Arc::new(Self { value: RwLock::new(None), default_observe, rejected:AtomicU64::new(0) }) }
-    pub fn telemetry(&self) -> (u64,u64) {
+    pub fn new(default_observe: bool) -> Arc<Self> { Arc::new(Self { value: RwLock::new(None), default_observe, rejected:AtomicU64::new(0), missing:AtomicU64::new(0) }) }
+    pub fn telemetry(&self) -> (u64,u64,u64) {
         let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         let state=self.value.read().unwrap();
         let generation=state.as_ref().filter(|s|s.received.elapsed()<=Duration::from_secs(15) && now<s.wire.expires_unix)
             .map(|s|s.wire.generation).unwrap_or(0);
-        (generation,self.rejected.load(Ordering::Relaxed))
+        (generation,self.rejected.load(Ordering::Relaxed),self.missing.load(Ordering::Relaxed))
     }
     fn apply(&self,b:&[u8]) -> bool {
         if b.len()>MAX_DOCUMENT_BYTES { return false; }
@@ -48,17 +48,25 @@ impl Runtime {
         let p = Policy { mode:s.wire.mode, observe:s.wire.observe, exempt };
         (p, !p.observe && !exempt && s.wire.block.iter().any(|n| n.contains(&ip)))
     }
+    fn record_open_error(&self, kind: io::ErrorKind) {
+        if kind == io::ErrorKind::NotFound {
+            self.missing.fetch_add(1,Ordering::Relaxed);
+        } else {
+            self.rejected.fetch_add(1,Ordering::Relaxed);
+        }
+    }
     pub async fn watch(self: Arc<Self>, path: String) {
         if path.is_empty() { return; }
         loop {
-            let mut accepted=false;
-            if let Ok(file)=tokio::fs::File::open(&path).await {
-                let mut b=Vec::new();
-                if file.take((MAX_DOCUMENT_BYTES+1) as u64).read_to_end(&mut b).await.is_ok() {
-                    accepted=self.apply(&b);
+            match tokio::fs::File::open(&path).await {
+                Ok(file) => {
+                    let mut b=Vec::new();
+                    let accepted=file.take((MAX_DOCUMENT_BYTES+1) as u64)
+                        .read_to_end(&mut b).await.is_ok() && self.apply(&b);
+                    if !accepted { self.rejected.fetch_add(1,Ordering::Relaxed); }
                 }
+                Err(e) => self.record_open_error(e.kind()),
             }
-            if !accepted { self.rejected.fetch_add(1,Ordering::Relaxed); }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
@@ -90,6 +98,14 @@ impl Runtime {
         assert!(r.policy(ip).1); assert_eq!(r.policy(ip).0.mode,3);
         r.value.write().unwrap().as_mut().unwrap().received=Instant::now()-Duration::from_secs(16);
         let (p,blocked)=r.policy(ip); assert!(p.observe); assert_eq!(p.mode,0); assert!(!blocked);
+    }
+    #[test] fn missing_policy_file_is_not_invalid_policy() {
+        let r=Runtime::new(true);
+        r.record_open_error(io::ErrorKind::NotFound);
+        r.record_open_error(io::ErrorKind::NotFound);
+        r.record_open_error(io::ErrorKind::PermissionDenied);
+        assert_eq!(r.telemetry(), (0,1,2));
+        assert!(r.policy("192.0.2.1".parse().unwrap()).0.observe);
     }
     #[test] fn allow_precedes_block() {
         let r=Runtime::new(true); let ip="192.0.2.4".parse().unwrap();
