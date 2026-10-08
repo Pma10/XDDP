@@ -9,7 +9,8 @@ struct Prepared { original: Arc<Vec<u8>>, parts: Option<(Vec<u8>,Vec<u8>)> }
 impl Prepared {
     fn new(value: &serde_json::Value, max: usize) -> Option<Self> {
         let text=serde_json::to_vec(value).ok()?;
-        if text.len().checked_add(5)? > max { return None; }
+        // Include both VarInt lengths and the packet id in the cap.
+        if wire_size(text.len())? > max { return None; }
         let original=Arc::new(status_frame(&text));
         let parts=if let Some(version)=value.get("version").and_then(|v|v.as_object()) {
             let prefix=b"{\"version\":{\"protocol\":".to_vec();
@@ -25,7 +26,7 @@ impl Prepared {
             }
             suffix.push(b'}');
             // Reserve space for any nonnegative i32 client version and framing.
-            if prefix.len()+10+suffix.len()+5 > max { return None; }
+            if wire_size(prefix.len().checked_add(10)?.checked_add(suffix.len())?)? > max { return None; }
             Some((prefix,suffix))
         } else { None };
         Some(Self {original,parts})
@@ -40,6 +41,15 @@ impl Prepared {
         body.extend_from_slice(prefix); body.extend_from_slice(number.as_bytes()); body.extend_from_slice(suffix);
         Arc::new(protocol::frame(&body))
     }
+}
+fn varint_size(mut n:usize)->usize {
+    let mut size=1;
+    while n>=128 { size+=1; n>>=7; }
+    size
+}
+fn wire_size(json_len:usize)->Option<usize> {
+    let body_len=json_len.checked_add(varint_size(json_len))?.checked_add(1)?;
+    body_len.checked_add(varint_size(body_len))
 }
 fn status_frame(text:&[u8])->Vec<u8> {
     let mut body=vec![0]; protocol::put_varint(text.len() as i32,&mut body);
@@ -129,6 +139,21 @@ pub fn proxy_header(src: SocketAddr, dst: SocketAddr) -> std::io::Result<Vec<u8>
         assert!(Prepared::new(&value,32).is_none());
         let plain=serde_json::json!({"description":"plain"});
         let p=Prepared::new(&plain,256).unwrap(); assert_eq!(decoded(&p.render(774)),plain);
+    }
+    #[test] fn max_response_bytes_includes_all_frame_and_string_varints() {
+        // Both length fields need three bytes at this payload size.
+        let value=serde_json::json!({"description":"a".repeat(16400)});
+        let json_len=serde_json::to_vec(&value).unwrap().len();
+        assert_eq!(wire_size(json_len).unwrap(),json_len+7);
+        assert!(Prepared::new(&value,json_len+5).is_none());
+        let p=Prepared::new(&value,json_len+7).unwrap();
+        assert_eq!(p.render(-1).len(),json_len+7);
+        let versioned=serde_json::json!({"version":{"name":"test","protocol":47},
+            "description":"a".repeat(16400)});
+        let full_len=serde_json::to_vec(&versioned).unwrap().len();
+        let tight=full_len+7;
+        // i32::MAX needs more digits than the cached protocol value.
+        assert!(Prepared::new(&versioned,tight).is_none());
     }
     #[test] fn proxy_v2_lengths_and_endianness() {
         let b = proxy_header("192.0.2.7:12345".parse().unwrap(), "198.51.100.1:25565".parse().unwrap()).unwrap();
