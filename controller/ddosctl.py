@@ -137,6 +137,9 @@ class Controller:
     def command(self, args):
         if args == ["status"]:
             return dict(mode=MODES[self.mode],observe=self.cfg["observe"],signals=self.signals,
+                        configured_syn_per_cpu=self.cfg["syn_per_cpu"][MODES[self.mode]],
+                        configured_owned_prefixes=len(self.cfg["owned_prefixes"]),
+                        configured_protected_tcp_ports=self.cfg["protected_tcp_ports"],
                         gate_metrics_available=self.snapshot.get("gate_metrics_available",False),
                         published_generation=self.generation,
                         gate_runtime_generation=self.snapshot.get("gate_runtime_generation"),
