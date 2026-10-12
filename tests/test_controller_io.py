@@ -40,6 +40,16 @@ class ControllerIOTests(unittest.TestCase):
         self.assertEqual(runtime["mode"],2); self.assertFalse(runtime["observe"])
         self.assertTrue(any(call[0]=="config" and call[2]==0 for call in self.calls))
 
+    def test_status_reports_configured_syn_policy_without_claiming_attachment(self):
+        self.controller.cfg["owned_prefixes"]=["192.0.2.1/32"]
+        self.controller.cfg["syn_per_cpu"]["attack"]={"rate":100,"burst":200}
+        self.controller.mode=2
+        state=self.controller.command(["status"])
+        self.assertEqual(state["configured_syn_per_cpu"],{"rate":100,"burst":200})
+        self.assertEqual(state["configured_owned_prefixes"],1)
+        self.assertEqual(state["configured_protected_tcp_ports"],[25565])
+        self.assertTrue(state["observe"])
+
     def test_acl_command_updates_kernel_and_gate(self):
         self.controller.command(["block","198.51.100.7/24"])
         c=self.controller.cfg
