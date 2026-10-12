@@ -120,10 +120,6 @@ impl Limiter {
         if allowed || p.exempt { return true; }
         if p.observe { self.metrics.inc(27); true } else { self.metrics.inc(reason); false }
     }
-    pub fn global(&self, event: Event, p: Policy) -> bool {
-        let allowed = self.global.lock().unwrap()[event as usize].take(Instant::now(), self.cfg.mode_multipliers[p.mode], self.cfg.preserve_burst);
-        self.judged(allowed, 16, Policy { exempt: false, ..p })
-    }
     pub fn accept(self: &Arc<Self>, ip: IpAddr, p: Policy) -> Option<Ticket> {
         let ip = normalize(ip); let prefix = subnet(ip, self.cfg.ipv4_prefix, self.cfg.ipv6_prefix);
         let now = Instant::now();
@@ -148,10 +144,16 @@ impl Limiter {
         let ip_ok = i.buckets[0].available(now, factor, self.cfg.preserve_burst) && now >= i.penalty_until;
         let prefix_ok = net.buckets[0].available(now, factor, self.cfg.preserve_burst) && now >= net.penalty_until;
         if !self.judged(ip_ok, 14, p) || !self.judged(prefix_ok, 15, p) { return None; }
+        // Match event()'s IP -> prefix -> global lock order. A rejected or
+        // capacity-limited connection must not drain the shared connect burst.
+        let mut global = self.global.lock().unwrap();
+        let global_ok = global[Event::Connect as usize].available(now, factor, self.cfg.preserve_burst);
+        if !self.judged(global_ok, 16, Policy { exempt:false, ..p }) { return None; }
         if !p.exempt {
             if ip_ok { i.buckets[0].consume(); }
             if prefix_ok { net.buckets[0].consume(); }
         }
+        if global_ok { global[Event::Connect as usize].consume(); }
         i.active += 1; net.active += 1; i.pending += 1; net.pending += 1;
         Some(Ticket { limiter: self.clone(), ip, prefix, handshake: false, admitted: false,
             status_complete: false, server_rejected: false, status: false })
@@ -358,6 +360,46 @@ mod tests {
         assert!(!l.event(&a,Event::Login,p));
         assert!(l.ip.shards[l.ip.shard(a.ip)].lock().unwrap()[&a.ip].buckets[3].tokens>=1.0);
         assert!(l.global.lock().unwrap()[3].tokens>=2.0);
+    }
+
+    #[test] fn rejected_connects_do_not_drain_global_tokens() {
+        let mut cfg=config(); cfg.connections_ip=1;
+        cfg.global.connect=Rate {per_second:0.001,burst:2.0};
+        let m=Arc::new(Metrics::new()); let l=Limiter::new(cfg,m);
+        let p=Policy {mode:0,observe:false,exempt:false};
+        let a=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
+        for _ in 0..20 { assert!(l.accept("192.0.2.1".parse().unwrap(),p).is_none()); }
+        assert_eq!(l.global.lock().unwrap()[Event::Connect as usize].tokens,1.0);
+        let b=l.accept("192.0.2.2".parse().unwrap(),p).unwrap();
+        assert_eq!(l.global.lock().unwrap()[Event::Connect as usize].tokens,0.0);
+        drop(a); drop(b);
+    }
+    #[test] fn rejected_global_connect_preserves_source_and_cgnat_burst() {
+        let mut cfg=config();
+        cfg.global.connect=Rate {per_second:0.001,burst:1.0};
+        cfg.ip.connect=Rate {per_second:0.001,burst:1.0};
+        cfg.prefix.connect=Rate {per_second:0.001,burst:2.0};
+        let m=Arc::new(Metrics::new()); let l=Limiter::new(cfg,m.clone());
+        let p=Policy {mode:0,observe:false,exempt:false};
+        let first=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
+        let other:"std::net::IpAddr" = "192.0.2.2".parse().unwrap();
+        assert!(l.accept(other,p).is_none());
+        let ip=l.ip.shards[l.ip.shard(other)].lock().unwrap();
+        assert_eq!(ip[&other].buckets[0].tokens,1.0);
+        drop(ip);
+        let prefix="192.0.2.0".parse().unwrap();
+        let net=l.prefix.shards[l.prefix.shard(prefix)].lock().unwrap();
+        assert!(net[&prefix].buckets[0].tokens>=1.0);
+        drop(net);
+        assert_eq!(m.get(16),1); drop(first);
+    }
+    #[test] fn exempt_identity_still_respects_global_connect_cap() {
+        let mut cfg=config();
+        cfg.global.connect=Rate {per_second:0.001,burst:1.0};
+        let l=Limiter::new(cfg,Arc::new(Metrics::new()));
+        let p=Policy {mode:0,observe:false,exempt:true};
+        let _a=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
+        assert!(l.accept("192.0.2.2".parse().unwrap(),p).is_none());
     }
     #[test] fn rejected_connect_preserves_cgnat_prefix_burst() {
         let mut cfg=config();
