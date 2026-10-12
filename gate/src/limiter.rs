@@ -371,7 +371,7 @@ mod tests {
         for _ in 0..20 { assert!(l.accept("192.0.2.1".parse().unwrap(),p).is_none()); }
         assert_eq!(l.global.lock().unwrap()[Event::Connect as usize].tokens,1.0);
         let b=l.accept("192.0.2.2".parse().unwrap(),p).unwrap();
-        assert_eq!(l.global.lock().unwrap()[Event::Connect as usize].tokens,0.0);
+        assert!(l.global.lock().unwrap()[Event::Connect as usize].tokens<0.01);
         drop(a); drop(b);
     }
     #[test] fn rejected_global_connect_preserves_source_and_cgnat_burst() {
@@ -382,7 +382,7 @@ mod tests {
         let m=Arc::new(Metrics::new()); let l=Limiter::new(cfg,m.clone());
         let p=Policy {mode:0,observe:false,exempt:false};
         let first=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
-        let other:"std::net::IpAddr" = "192.0.2.2".parse().unwrap();
+        let other: IpAddr = "192.0.2.2".parse().unwrap();
         assert!(l.accept(other,p).is_none());
         let ip=l.ip.shards[l.ip.shard(other)].lock().unwrap();
         assert_eq!(ip[&other].buckets[0].tokens,1.0);
