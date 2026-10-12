@@ -61,6 +61,14 @@ changing generation. Unchanged files do not renew leases. With a nonempty
 `runtime_file`, missing/stale controller state means NORMAL/observation; set
 `runtime_file=""` only for standalone gate operation governed by `observe`.
 
+
+`ddosctl status` also reports `configured_syn_per_cpu` (rate and burst for
+the current mode), `configured_owned_prefixes` (count) and
+`configured_protected_tcp_ports`. These reflect the controller's configuration,
+**not** confirmation that a BPF program is attached, that enforcement is enabled,
+or that a rate has been calibrated. Check `ddosctl xdp status` and `observe`
+separately; `rate=0` disables SYN limiting.
+
 ## Admission bounds
 
 `total_sockets` bounds gate-owned player/cache TCP sockets. The sum of `prelogin`,
@@ -125,9 +133,12 @@ players or their shared NAT. Malformed or incomplete client input still counts.
 Handshake/status/login tokens are charged only after IP, prefix and global policy
 accepts the event. An enforced source rejection cannot spend a shared prefix or
 global event budget. Source-exempt clients spend only the global event budget.
-Connect IP/prefix tokens likewise commit together; the separate global accept
-guard still counts incoming accepts before allocating identity state, including
-clients later rejected by source policy. Observation records candidates and
+Connect IP/prefix/global tokens also commit together, after a socket and
+prelogin slot have been reserved and identity/concurrency policy has passed.
+Connections rejected by source policy, identity-table pressure, or resource caps
+do not consume the shared global connect budget. Source-exempt clients still
+consume global connect tokens. These changes protect fair admission, not kernel
+SYN backlog or conntrack, which occur before the Rust gate. Observation records candidates and
 charges available buckets without creating token debt.
 
 ## Minecraft compatibility
