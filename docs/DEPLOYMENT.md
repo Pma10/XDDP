@@ -31,6 +31,11 @@ PASS test; the full program still requires its own verifier and integration test
 3. Keep `observe=true`, `manual_mode="normal"`, zero SYN budgets. Adjust paths
    only within the dedicated `/sys/fs/bpf/xddp/GENERATION` namespace. Existing
    maps must have the current ABI; use a fresh generation after ABI changes.
+   XDP emergency SYN freeze expands the counters map to ABI **v2**. A
+   pre-existing installed `/etc/xddp/controller.json` is preserved by setup;
+   explicitly choose a **new** `pin_dir` such as `/sys/fs/bpf/xddp/v2`
+   before starting the updated controller. Never replace an attached v1 map
+   in place or delete a pinned generation used by a running XDP program.
    Startup and controller attachment validate every map's type, key/value size,
    capacity and flags, and verify that each pin belongs to the pinned program.
    `xddp-loader validate PIN_DIR` runs the same read-only check. Incompatible or
