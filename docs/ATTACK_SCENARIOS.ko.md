@@ -33,7 +33,7 @@ PROXY v2 수신 백엔드 → 인증/BotSentry/게임 서버다.
 | L3: 작은 패킷으로 높은 PPS | RX queue, softirq CPU, softnet drop | 앞단 PPS 방어와 XDP의 저비용 검사. 실제 NIC/가상 NIC에서 처리 한계 측정 | 상태 생성 없는 XDP 경로. 모든 정상 형식의 패킷을 걸러내는 기능은 없음 |
 | L3: 조각화/IPv6 확장 헤더 | fragment 재조립 비용, IPv6 deferred | 앞단/호스트 정책으로 처리. IPv4와 IPv6 경로를 따로 시험 | TCP fragment 차단은 선택 사항이며 주소상의 다른 TCP 서비스에도 영향. IPv6 확장 경로는 주로 커널 위임 |
 | L3/L4: 잘못된 길이/헤더 | malformed 후보, 커널 drop | 경계와 구조 검사 후 커널 검증 | XDP 기본 IP 파싱 오류는 owned 목적지 확인 전에도 후보 DROP이 될 수 있음. 적용 인터페이스 전체 영향 검증 필요. 체크섬/세부 TCP 옵션은 Linux 담당 |
-| L4: SYN만 대량 전송 | SYN_RECV, syncookie, backlog, SYN/s | 앞단 SYN 검증, Linux SYN cookie 설정 확인, 필요 시 XDP SYN 예산 | XDP SYN 예산은 CPU별이고 기본 0. CPU/RX 분배 변경 시 실효 한도가 달라짐. SYN proxy는 미구현 |
+| L4: SYN만 대량 전송 | SYN_RECV, syncookie, backlog, SYN/s | 앞단 SYN 검증, Linux SYN cookie 설정 확인, 필요 시 XDP SYN 예산, 심각할 때 일시 EMERGENCY SYN freeze | XDP SYN 예산은 CPU별이고 기본 0. 자동 EMERGENCY는 다중 지표 충족 시에만 선택 허용. FREEZE는 정상 신규 접속도 중단하고 기존 ACK/PSH는 통과; SYN proxy는 미구현 |
 | L4: ACK/RST/PSH 대량 전송 | softirq, NIC PPS, 재전송/지터 | 앞단의 TCP 검증과 Linux 상태 검증. 정상 ACK/PSH 일괄 PPS 제한은 피함 | XDDP는 정상 헤더 모양만으로 기존 TCP 세션 소속을 증명하지 못함. stateless XDP의 중요한 잔여 위험 |
 | L4/L7: TCP 연결만 하고 유지 | accepts/s, active_prelogin, FD | 전역 자원 상한, 최초 데이터/절대 handshake 제한 시간, 필요 시 출발지별 미완료 연결 상한 | 미완료 연결 제한과 시간 제한 구현. 분산 소스는 전체 prelogin 풀을 계속 점유할 수 있어 앞단 신규 연결 검증도 필요 |
 | L7: 바이트를 조금씩 보내 유지 | progress/handshake timeout, prelogin 점유 | 진행 제한 시간과 별개인 절대 단계 제한 시간 유지 | 구현됨. 지연/손실 높은 정상 클라이언트로 시간 제한 오탐 확인 |
