@@ -21,10 +21,23 @@ concurrency caps: observation does not mean forwarding malformed streams to Java
 No logging is performed per rejected packet or client.
 
 NORMAL/ELEVATED/ATTACK select configured SYN budgets and admission multipliers.
+In EMERGENCY with a valid XDP lease and `observe=false`, XDP drops initial
+TCP SYNs for owned protected services before conntrack, **even for allowlisted
+addresses**, while passing normal ACK/PSH/FIN and SYN-ACK traffic to Linux.
+`candidate_drop{reason="emergency_syn"}` distinguishes this from ordinary
+SYN rate limiting. It is not a stateful established-connection verifier;
+spoofed ACK floods, IPv6 extension chains, fragments and upstream saturation
+remain separate risks. EMERGENCY intentionally prevents *all* new connections
+(including legitimate players) to protected services. Existing gate relays are
+not closed by a mode change. After EMERGENCY the existing one-step de-escalation
+reopens admission through ATTACK -> ELEVATED -> NORMAL when those modes have
+suitable validated recovery thresholds and SYN budgets.
+
 Rate reductions affect connect/handshake/status/login, never relays. In enforced
 EMERGENCY no new client is admitted, including an allow-listed client. Prefix
 allow-listing exempts source/prefix rate/penalty/deny policy, not hard caps or
-global rate limits. Empty/zero rate configuration stays disabled in every mode.
+global rate limits. Empty/zero rate configuration stays disabled for SYN token buckets in all modes;
+EMERGENCY's dedicated new-SYN freeze does not require a nonzero token bucket.
 The sample nonzero multipliers only scale operator-configured rates; they are
 not production thresholds. All actual rates/transition thresholds require data.
 
@@ -36,7 +49,13 @@ that mode. This permits traffic plus resource-pressure corroboration, rather tha
 using raw interface PPS alone. Missing required signals prevent escalation.
 `adaptive.allow_emergency` defaults to **false**, including when omitted from old
 configurations: automatic escalation stops at ATTACK unless explicitly enabled.
-Manual EMERGENCY remains available. Escalation requires
+Manual EMERGENCY remains available. When `allow_emergency=true`, configuration
+validation requires `required_signals.emergency` to include both a connection
+anomaly (SYN/accept/handshake/churn rate) and independent resource pressure
+(conntrack/prelogin/backend occupancy or resource-limit rate), with corresponding
+configured bands. A lone PPS surge cannot automatically freeze the service.
+The thresholds must be calibrated against normal login/restart bursts.
+Escalation requires
 consecutive samples and cooldown. De-escalation requires every signal configured
 for the current mode to be present and below `exit`, consecutive samples and
 cooldown, then decreases one mode. Missing telemetry cannot itself escalate or
