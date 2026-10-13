@@ -173,6 +173,9 @@ class XDPTests(unittest.TestCase):
         for flags in (0x10,0x18,0x11,0x12,0x04):
             self.assertEqual(self.run_packet(tcp(flags=flags,payload=b"play")),2)
         self.assertEqual(self.run_packet(tcp(flags=0x02,port=25566)),2)
+        outside = bytearray(tcp(flags=0x02))
+        outside[30:34] = bytes([192,0,2,2])  # Destination outside owned /32.
+        self.assertEqual(self.run_packet(outside),2)
         self.loader("prefix",self.pin,"allow","add","198.51.100.7/32",1)
         self.assertEqual(self.run_packet(tcp(flags=0x02)),1)
         self.assertEqual(self.run_packet(tcp(flags=0x18)),2)
