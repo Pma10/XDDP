@@ -28,10 +28,14 @@ impl Runtime {
             return false;
         }
         let mut state=self.value.write().unwrap();
-        if state.as_ref().map(|x|x.wire.generation)!=Some(w.generation) {
-            // Explicit expired publications retire the previous policy immediately.
-            *state=Some(Snapshot {wire:w,received:Instant::now()});
+        if let Some(previous)=state.as_ref() {
+            // Never let a stale or replayed generation restore an older policy.
+            // Identical generations cannot renew a lease or replace contents.
+            if w.generation < previous.wire.generation { return false; }
+            if w.generation == previous.wire.generation { return true; }
         }
+        // Explicit expired publications retire the previous policy immediately.
+        *state=Some(Snapshot {wire:w,received:Instant::now()});
         true
     }
     pub fn policy(&self, ip: IpAddr) -> (Policy, bool) {
@@ -80,6 +84,28 @@ impl Runtime {
         assert!(r.apply(&serde_json::to_vec(&expired).unwrap()));
         assert!(r.policy("192.0.2.1".parse().unwrap()).0.observe);
         assert_eq!(r.telemetry().0,0);
+    }
+    #[test] fn replayed_old_generation_cannot_reenable_expired_or_blocking_policy() {
+        let r=Runtime::new(true);
+        let ip="192.0.2.4".parse().unwrap();
+        let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let enforced=serde_json::json!({"generation":7,"expires_unix":now+10,
+            "mode":2,"observe":false,"allow":[],"block":["192.0.2.0/24"]});
+        assert!(r.apply(&serde_json::to_vec(&enforced).unwrap()));
+        assert!(r.policy(ip).1);
+        let newer=serde_json::json!({"generation":8,"expires_unix":now+10,
+            "mode":0,"observe":true,"allow":[],"block":[]});
+        assert!(r.apply(&serde_json::to_vec(&newer).unwrap()));
+        assert!(!r.policy(ip).1);
+        assert!(!r.apply(&serde_json::to_vec(&enforced).unwrap()));
+        assert_eq!(r.telemetry().0,8);
+        assert!(!r.policy(ip).1);
+        let expired=serde_json::json!({"generation":9,"expires_unix":0,
+            "mode":2,"observe":false,"allow":[],"block":["192.0.2.0/24"]});
+        assert!(r.apply(&serde_json::to_vec(&expired).unwrap()));
+        assert!(r.policy(ip).0.observe);
+        assert!(!r.apply(&serde_json::to_vec(&enforced).unwrap()));
+        assert!(r.policy(ip).0.observe);
     }
     #[test] fn expired_and_unrenewed_lease_fail_to_observation() {
         let r=Runtime::new(true); let ip="192.0.2.4".parse().unwrap();
