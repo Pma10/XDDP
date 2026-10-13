@@ -16,7 +16,7 @@
 
 _Static_assert(sizeof(struct config) == 40, "config ABI");
 _Static_assert(sizeof(struct prefix_key) == 24, "prefix ABI");
-_Static_assert(sizeof(struct stats) == 168, "stats ABI");
+_Static_assert(sizeof(struct stats) == 176, "stats ABI");
 
 static void die(const char *s) { perror(s); exit(1); }
 static void require(int ok, const char *s) {
@@ -183,7 +183,7 @@ static void prefix(char **v) {
 static const char *reasons[R_COUNT] = {
     "none", "malformed_l2", "malformed_ipv4", "invalid_tcp", "blocked_port",
     "bogon", "fragment", "syn_rate", "source_rate", "prefix_rate",
-    "global_rate", "manual_block", "other"
+    "global_rate", "manual_block", "other", "emergency_syn"
 };
 static void clear_map(const char *dir, const char *name) {
     require(!strcmp(name,"ports") || !strcmp(name,"owned") || !strcmp(name,"allow") || !strcmp(name,"block"), "cannot clear this map");
