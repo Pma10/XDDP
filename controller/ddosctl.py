@@ -61,7 +61,7 @@ class Controller:
         budget = c["syn_per_cpu"][MODES[self.mode]]
         self.loader("config", c["pin_dir"], time.monotonic_ns() + int(seconds * 1e9) if seconds else 0,
                     int(c["observe"]), self.mode, int(c["ipv6"]), int(c["drop_tcp_fragments"]),
-                    budget["rate"], budget["burst"], 1)
+                    budget["rate"], budget["burst"], 2)
 
     def prepare(self):
         pin = Path(self.cfg["pin_dir"])
