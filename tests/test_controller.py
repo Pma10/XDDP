@@ -43,6 +43,27 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(c=c),self.assertRaises(ValueError):
                 validate(c)
 
+    def test_auto_emergency_requires_independent_pressure_and_connection_signals(self):
+        def policy(required, bands):
+            cfg=copy.deepcopy(self.cfg)
+            cfg["adaptive"]["allow_emergency"]=True
+            cfg["adaptive"]["required_signals"]={"emergency":required}
+            cfg["adaptive"]["thresholds"]["emergency"]={
+                s:{"enter":100,"exit":50} for s in bands}
+            return cfg
+        for required, bands in [
+            ([],["pps"]),
+            (["syn_per_second"],["syn_per_second"]),
+            (["pps","conntrack_percent"],["pps","conntrack_percent"]),
+            (["syn_per_second","bps"],["syn_per_second","bps"]),
+            (["syn_per_second","unknown"],["syn_per_second","conntrack_percent"])]:
+            with self.subTest(required=required),self.assertRaises(ValueError):
+                validate(policy(required,bands))
+        for required in (["syn_per_second","conntrack_percent"],
+                         ["churn_per_second","active_prelogin"]):
+            with self.subTest(required=required):
+                validate(policy(required,required))
+
     def test_cidr_canonicalization(self):
         self.cfg["allow_prefixes"] = ["192.0.2.7/24","192.0.2.0/24"]
         self.assertEqual(validate(self.cfg)["allow_prefixes"],["192.0.2.0/24"])
