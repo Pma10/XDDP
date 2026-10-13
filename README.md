@@ -10,6 +10,10 @@ Production thresholds and PvP latency/jitter budgets are **MEASUREMENT REQUIRED*
 
 ## Behavior
 
+- In leased, enforced EMERGENCY, XDP freezes new SYNs only for explicitly owned
+  protected TCP services (including allowlisted sources), while leaving existing
+  ACK/PSH/FIN and SYN-ACK packets untouched. The emergency reason is separately
+  counted; observation and controller lease expiry still fail open.
 - XDP validates Ethernet/VLAN/IP/TCP bounds, explicit service ports and prefix
   policy, and optionally shapes SYNs per processing CPU. No source-state
   insertion, connection tracking, CPUMAP, AF_XDP or Minecraft parsing in XDP.
@@ -62,6 +66,9 @@ sudo sh scripts/netns_test.sh
 `Cargo.lock` is committed; builds use `--locked`. XDP is built with BPF ISA v2,
 libbpf map BTF and stable packet wire layouts. No kernel structure offsets are
 used, so a generated `vmlinux.h` and CO-RE relocations are unnecessary here.
+The XDP emergency SYN-freeze change uses ABI v2. Existing deployments must
+migrate to a fresh pin generation such as `/sys/fs/bpf/xddp/v2`; installation
+does not overwrite existing controller configurations or attach automatically.
 The libbpf API floor is 1.1. Native XDP is primary; SKB mode requires explicit
 configuration and is never silently selected.
 
