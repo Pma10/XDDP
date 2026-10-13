@@ -49,11 +49,11 @@ class XDPTests(unittest.TestCase):
         self.loader("clear",self.pin,"allow")
         self.loader("clear",self.pin,"block")
 
-    def configure(self,observe=0,lease=60,fragments=0,rate=0,burst=0):
-        self.loader("config",self.pin,time.monotonic_ns()+int(lease*1e9),observe,0,1,fragments,rate,burst,1)
+    def configure(self,observe=0,lease=60,fragments=0,rate=0,burst=0,mode=0):
+        self.loader("config",self.pin,time.monotonic_ns()+int(lease*1e9),observe,mode,1,fragments,rate,burst,2)
 
     @contextmanager
-    def foreign_counters(self,value_size=168,map_type=6,key_size=4,entries=1):
+    def foreign_counters(self,value_size=176,map_type=6,key_size=4,entries=1):
         # Deliberately replace only a private test pin; keep the original FD
         # alive and restore it even when an assertion fails.
         import ctypes
@@ -165,6 +165,26 @@ class XDPTests(unittest.TestCase):
         self.assertEqual(self.run_packet(v6),2)
         ext=bytearray(v6); ext[20]=0
         self.assertEqual(self.run_packet(ext),2) # explicit extension-chain deferral
+
+    def test_emergency_freezes_only_new_syn_for_owned_game_service(self):
+        # No rate/burst is configured: emergency itself must still freeze SYN.
+        self.configure(mode=3, rate=0, burst=0)
+        self.assertEqual(self.run_packet(tcp(flags=0x02)),1)
+        for flags in (0x10,0x18,0x11,0x12,0x04):
+            self.assertEqual(self.run_packet(tcp(flags=flags,payload=b"play")),2)
+        self.assertEqual(self.run_packet(tcp(flags=0x02,port=25566)),2)
+        self.loader("prefix",self.pin,"allow","add","198.51.100.7/32",1)
+        self.assertEqual(self.run_packet(tcp(flags=0x02)),1)
+        self.assertEqual(self.run_packet(tcp(flags=0x18)),2)
+        stats=json.loads(self.loader("stats",self.pin))
+        self.assertGreater(stats["candidate_reasons"]["emergency_syn"],0)
+
+    def test_emergency_observation_and_expired_lease_fail_open(self):
+        for observe,lease in ((1,60),(0,-1)):
+            with self.subTest(observe=observe,lease=lease):
+                self.configure(mode=3,observe=observe,lease=lease)
+                self.assertEqual(self.run_packet(tcp(flags=0x02)),2)
+                self.assertEqual(self.run_packet(tcp(flags=0x18)),2)
 
     def test_syn_budget_exempts_ack_and_has_no_dynamic_source_map(self):
         self.configure(rate=1,burst=1)
