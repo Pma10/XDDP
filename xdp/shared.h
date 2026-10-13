@@ -2,7 +2,7 @@
 #define XDDP_SHARED_H
 #include <linux/types.h>
 
-#define XDDP_ABI 1
+#define XDDP_ABI 2
 #define PORT_PROTECT_TCP 1
 #define PORT_DROP_TCP 2
 #define PORT_DROP_UDP 4
@@ -11,7 +11,8 @@
 enum reason {
     R_NONE, R_MALFORMED_L2, R_MALFORMED_IPV4, R_INVALID_TCP,
     R_BLOCKED_PORT, R_BOGON, R_FRAGMENT, R_SYN_RATE, R_SOURCE_RATE,
-    R_PREFIX_RATE, R_GLOBAL_RATE, R_MANUAL_BLOCK, R_OTHER, R_COUNT
+    R_PREFIX_RATE, R_GLOBAL_RATE, R_MANUAL_BLOCK, R_OTHER,
+    R_EMERGENCY_SYN, R_COUNT
 };
 
 /* Explicit sizes/ordering are mirrored by controller and checked by loader. */
