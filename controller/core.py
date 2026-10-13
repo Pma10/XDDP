@@ -114,6 +114,18 @@ def validate(cfg):
             raise ValueError("adaptive intervals must be integer")
     if set(a["thresholds"]) != set(MODES[1:]):
         raise ValueError("all adaptive threshold modes required")
+    # Auto-EMERGENCY stops all new logins and drops owned-service SYNs at XDP.
+    # Require *both* a new-connection anomaly and an independent resource
+    # pressure indicator; one high interface PPS signal must never suffice.
+    if a.get("allow_emergency", False):
+        emergency_guards = set(guards.get("emergency", []))
+        traffic = {"syn_per_second", "accepts_per_second",
+                   "handshakes_per_second", "churn_per_second"}
+        pressure = {"conntrack_percent", "active_prelogin",
+                    "backend_connections", "resource_limited_per_second"}
+        if not (emergency_guards & traffic and emergency_guards & pressure
+                and len(emergency_guards) >= 2):
+            raise ValueError("automatic emergency requires both connection-anomaly and resource-pressure signals")
     for mode, thresholds in a["thresholds"].items():
         if not isinstance(thresholds, dict) or not set(thresholds) <= SIGNALS:
             raise ValueError(f"invalid signals for {mode}")
