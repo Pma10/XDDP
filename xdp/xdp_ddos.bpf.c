@@ -118,6 +118,13 @@ int xddp(struct xdp_md *ctx)
     if (p.proto != 6 || !(*policy & PORT_PROTECT_TCP)) return result(s, c, 0, now);
     int syn = (p.flags & 0x12) == 0x02;
     if (syn) s->syn_packets++;
+    /* EMERGENCY freezes new handshakes at XDP before Linux conntrack.
+     * No per-flow tracking: established ACK/PSH/FIN and SYN-ACK packets pass
+     * unless a separately configured manual ACL or structural rule drops them.
+     * Even allow-listed sources cannot create new connections in EMERGENCY.
+     * Lease expiry and observe mode retain the normal fail-open behavior. */
+    if (syn && c->abi == XDDP_ABI && c->mode == 3 && now < c->lease_ns)
+        return result(s, c, R_EMERGENCY_SYN, now);
     if (bpf_map_lookup_elem(&allow, &p.src)) return result(s, c, 0, now);
     __u32 *deny = bpf_map_lookup_elem(&block, &p.src);
     if (deny) return result(s, c, *deny == R_BOGON ? R_BOGON : R_MANUAL_BLOCK, now);
