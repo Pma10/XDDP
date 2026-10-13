@@ -118,7 +118,11 @@ def validate(cfg):
     # Require *both* a new-connection anomaly and an independent resource
     # pressure indicator; one high interface PPS signal must never suffice.
     if a.get("allow_emergency", False):
-        emergency_guards = set(guards.get("emergency", []))
+        emergency_names = guards.get("emergency", [])
+        if (not isinstance(emergency_names, list) or
+                any(not isinstance(name, str) for name in emergency_names)):
+            raise ValueError("automatic emergency required signals must be strings")
+        emergency_guards = set(emergency_names)
         traffic = {"syn_per_second", "accepts_per_second",
                    "handshakes_per_second", "churn_per_second"}
         pressure = {"conntrack_percent", "active_prelogin",
