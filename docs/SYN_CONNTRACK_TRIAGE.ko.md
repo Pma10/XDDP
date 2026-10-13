@@ -54,8 +54,8 @@ sudo ddosctl config show
 2. `owned_prefixes`에 **실제 XDP가 관측하는 목적지 IP/CIDR**이 들어 있는가?
 3. `protected_tcp_ports`에 서비스 포트가 포함되는가? DNAT/상위 프록시 경로는 확인했는가?
 4. `observe`가 `false`인가? `manual_mode`/자동 모드와 별도로 확인한다.
-5. 현재 모드의 `syn_per_cpu.rate`·`burst`가 **0이 아닌 측정된 값**인가? 0이면 XDP SYN 제한은 비활성이다.
-6. `candidate_reasons.syn_rate`가 증가하는가? 실제 `drop_packets`도 증가하는가? 이 값만으로 정상 유저 보호를 확정하지 않는다.
+5. NORMAL/ELEVATED/ATTACK 모드에서는 `syn_per_cpu.rate`·`burst`가 **0이 아닌 측정된 값**인가? 0이면 해당 모드의 XDP SYN 제한은 비활성이다. EMERGENCY는 별개로 신규 SYN을 차단한다(관측 모드/만료 lease 제외).
+6. `candidate_reasons.syn_rate` 및 `candidate_reasons.emergency_syn`가 증가하는가? 실제 `drop_packets`도 증가하는가? 이 값만으로 정상 유저 보호를 확정하지 않는다.
 
 Rust 게이트의 글로벌/IP/프리픽스 접속 예산은 **TCP accept 이후** 동작하므로
 SYN backlog나 커널 Conntrack 테이블을 단독으로 보호할 수 없다. XDP SYN
