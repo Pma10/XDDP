@@ -57,7 +57,7 @@ production thresholds are provided.
 
 Controller leases use CLOCK_MONOTONIC-compatible nanoseconds for XDP. Gate state
 combines a short wall-clock expiry with a local monotonic receipt deadline and a
-changing generation. Unchanged files do not renew leases. With a nonempty
+changing generation. Unchanged files do not renew leases. Older runtime generations are rejected after a newer generation has been observed, preventing a stale file replay from restoring older block/mode settings. With a nonempty
 `runtime_file`, missing/stale controller state means NORMAL/observation; set
 `runtime_file=""` only for standalone gate operation governed by `observe`.
 
