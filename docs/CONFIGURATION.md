@@ -302,6 +302,18 @@ limit reserves space for any nonnegative i32 protocol before publishing a refres
 
 ## Metrics
 
+`adaptive.up_cooldown_seconds` optionally separates escalation timing from
+`cooldown_seconds` (which still controls recovery). Omission preserves the old
+shared cooldown. A value of zero permits escalation after `up_samples` without
+waiting for the recovery cooldown; required signals and consecutive samples still
+apply. Use observation to verify pressure thresholds before enforcing them.
+
+Controller telemetry includes `xddp_xdp_attached` (1 attached, 0 absent, -1 unknown),
+`xddp_xdp_program_id`, and `xddp_xdp_owned_destination_count`. Attachment presence
+does not verify program ownership, destination coverage or mitigation capacity.
+An attachment status query failure is reported as unknown and does not prevent
+lease publication. The normal failed-map/publication lease-expiry behavior remains.
+
 Gate Prometheus: `http://127.0.0.1:9109/metrics`; fixed metric names and no client
 IP labels. Counters include accepts, successful/invalid handshakes, status/login,
 VarInt/size/schema/timeouts, slow/early closes, scope-limited rates, saturation,

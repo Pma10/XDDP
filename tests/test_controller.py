@@ -55,6 +55,16 @@ class ConfigTests(unittest.TestCase):
         self.cfg["adaptive"]["allow_emergency"]="false"
         with self.assertRaises(ValueError): validate(self.cfg)
 
+    def test_independent_escalation_cooldown_validation(self):
+        for value in (-1, True, 0.5, float("nan"), 3601):
+            cfg=copy.deepcopy(self.cfg)
+            cfg["adaptive"]["up_cooldown_seconds"]=value
+            with self.subTest(value=value), self.assertRaises(ValueError): validate(cfg)
+        for value in (0, 3, 3600):
+            cfg=copy.deepcopy(self.cfg)
+            cfg["adaptive"]["up_cooldown_seconds"]=value
+            validate(cfg)
+
 
 class ModeTests(unittest.TestCase):
     def setUp(self):
@@ -79,6 +89,29 @@ class ModeTests(unittest.TestCase):
         a = Adaptive(self.cfg,0)
         for i in range(100):
             self.assertEqual(a.sample({"pps":1e9},i),0)
+
+    def test_pressure_escalates_without_waiting_for_recovery_cooldown(self):
+        self.cfg.update(cooldown_seconds=60, up_cooldown_seconds=0)
+        self.cfg["thresholds"]={"elevated":{"conntrack_percent":{"enter":60,"exit":40}},
+                                "attack":{"conntrack_percent":{"enter":80,"exit":60}},
+                                "emergency":{}}
+        a=Adaptive(self.cfg,0)
+        self.assertEqual(a.sample({"conntrack_percent":65},1),0)
+        self.assertEqual(a.sample({"conntrack_percent":65},2),1)
+        self.assertEqual(a.sample({"conntrack_percent":90},3),1)
+        self.assertEqual(a.sample({"conntrack_percent":90},4),2)
+        # Pressure disappears quickly, but recovery still waits for its cooldown.
+        for t in range(5,64): self.assertEqual(a.sample({"conntrack_percent":10},t),2)
+        self.assertEqual(a.sample({"conntrack_percent":10},64),1)
+
+    def test_fast_escalation_still_requires_samples_and_required_signals(self):
+        self.cfg["up_cooldown_seconds"]=0
+        self.cfg["thresholds"]["attack"]["conntrack_percent"]={"enter":80,"exit":60}
+        self.cfg["required_signals"]={"attack":["pps","conntrack_percent"]}
+        a=Adaptive(self.cfg,0)
+        for t in range(1,5): self.assertLessEqual(a.sample({"pps":1000},t),1)
+        self.assertEqual(a.sample({"pps":1000,"conntrack_percent":90},5),1)
+        self.assertEqual(a.sample({"pps":1000,"conntrack_percent":90},6),2)
 
     def test_counter_resets_are_not_attacks(self):
         self.assertEqual(rates({"rx_packets":100},{"rx_packets":1},1),{})

@@ -103,6 +103,19 @@ class Controller:
         current = self.loader("stats",self.cfg["pin_dir"])
         current.update(host_pressure())
         self.snapshot = copy.deepcopy(current)
+        # Status is a read-only netlink query. Unknown attachment is not zero
+        # traffic, and failure here must not prevent normal lease publication.
+        try:
+            attached = self.loader("status", self.cfg["interface"], self.cfg["xdp_mode"])
+            program_id = attached.get("program_id")
+            if type(program_id) is not int or program_id < 0:
+                raise ValueError("invalid attachment status")
+            self.snapshot["attached"] = int(program_id > 0)
+            self.snapshot["program_id"] = program_id
+        except (OSError, ValueError, subprocess.SubprocessError, AttributeError):
+            self.snapshot["attached"] = -1
+            self.snapshot["program_id"] = -1
+        self.snapshot["owned_destination_count"] = len(self.cfg["owned_prefixes"])
         try:
             current.update(self.gate_counters())
             self.snapshot["gate_metrics_available"] = True
@@ -140,7 +153,10 @@ class Controller:
                         gate_metrics_available=self.snapshot.get("gate_metrics_available",False),
                         published_generation=self.generation,
                         gate_runtime_generation=self.snapshot.get("gate_runtime_generation"),
-                        gate_runtime_rejected_reads=self.snapshot.get("gate_runtime_rejected_reads"))
+                        gate_runtime_rejected_reads=self.snapshot.get("gate_runtime_rejected_reads"),
+                        xdp_attached=self.snapshot.get("attached", -1),
+                        xdp_program_id=self.snapshot.get("program_id", -1),
+                        owned_destination_count=len(self.cfg["owned_prefixes"]))
         if args == ["stats"]:
             return self.snapshot
         if args == ["config","show"]:
@@ -261,7 +277,7 @@ def main():
     p.add_argument("command",nargs="*")
     args = p.parse_args()
     if args.check:
-        read_config(args.config); print("configuration valid; rates without measurements remain disabled"); return
+        read_config(args.config); print("configuration valid; no runtime changes applied"); return
     if args.daemon:
         Controller(read_config(args.config),args.config).run(); return
     if not args.command:

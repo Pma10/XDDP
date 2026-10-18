@@ -101,8 +101,12 @@ def validate(cfg):
             raise ValueError("SYN rate and burst must both be zero or positive")
     a = cfg["adaptive"]
     required = {"up_samples", "down_samples", "cooldown_seconds", "thresholds"}
-    if not required <= set(a) or set(a) - required - {"required_signals", "allow_emergency"}:
+    if not required <= set(a) or set(a) - required - {"required_signals", "allow_emergency", "up_cooldown_seconds"}:
         raise ValueError("invalid adaptive keys")
+    if "up_cooldown_seconds" in a:
+        positive(a["up_cooldown_seconds"], "up_cooldown_seconds", 0, 3600)
+        if type(a["up_cooldown_seconds"]) is not int:
+            raise ValueError("up_cooldown_seconds must be integer")
     if type(a.get("allow_emergency", False)) is not bool:
         raise ValueError("adaptive allow_emergency must be boolean")
     guards = a.get("required_signals", {})
@@ -156,7 +160,10 @@ class Adaptive:
             self.up = self.up + 1 if self.target == target else 1
             self.target = target
             self.down = 0
-            if self.up >= self.cfg["up_samples"] and now - self.changed >= self.cfg["cooldown_seconds"]:
+            # Keep legacy timing unless explicitly configured. Recovery cooldown
+            # must not force a busy host to wait before a stronger response.
+            up_cooldown = self.cfg.get("up_cooldown_seconds", self.cfg["cooldown_seconds"])
+            if self.up >= self.cfg["up_samples"] and now - self.changed >= up_cooldown:
                 self.mode, self.changed, self.up = target, now, 0
         else:
             self.up = 0

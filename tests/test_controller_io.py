@@ -131,6 +131,33 @@ class ControllerIOTests(unittest.TestCase):
         self.assertIsInstance(counters["runtime_generation"],int)
         self.assertEqual(counters["average_prelogin_duration_seconds"],0.1)
 
+    def test_attachment_metrics_and_unknown_do_not_block_lease_renewal(self):
+        for attachment, expected in (({"program_id":0},0),({"program_id":42},1),({},-1)):
+            def loader(*args):
+                self.calls.append(args)
+                if args[0]=="stats": return {"candidate_reasons":{}}
+                if args[0]=="status": return attachment
+                return {}
+            self.controller.loader=loader
+            with self.subTest(attachment=attachment), patch.object(self.controller,"gate_counters",return_value={}):
+                self.controller.tick()
+                text=Path(self.controller.cfg["metrics_file"]).read_text()
+                self.assertIn(f"xddp_xdp_attached {expected}\n",text)
+                self.assertIn("xddp_xdp_owned_destination_count 0\n",text)
+                self.assertEqual(self.calls[-1][0],"config")
+                self.assertEqual(self.controller.command(["status"])["xdp_attached"],expected)
+
+    def test_attachment_query_failure_is_unknown_not_no_traffic(self):
+        def loader(*args):
+            if args[0]=="stats": return {"candidate_reasons":{}}
+            if args[0]=="status": raise subprocess.CalledProcessError(1,args)
+            self.calls.append(args)
+            return {}
+        self.controller.loader=loader
+        with patch.object(self.controller,"gate_counters",return_value={}): self.controller.tick()
+        self.assertEqual(self.controller.snapshot["attached"],-1)
+        self.assertEqual(self.calls[-1][0],"config")
+
 
 if __name__ == "__main__":
     unittest.main()

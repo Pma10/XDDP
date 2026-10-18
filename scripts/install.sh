@@ -30,6 +30,7 @@ install -m 0755 gate/target/release/xddp-gate "$dest/usr/local/bin/xddp-gate"
 install -m 0644 controller/core.py controller/ddosctl.py "$dest/usr/local/lib/xddp/controller/"
 install -m 0755 scripts/ddosctl "$dest/usr/local/sbin/ddosctl"
 install -m 0755 scripts/preflight.sh "$dest/usr/local/libexec/xddp-preflight"
+install -m 0755 scripts/deployment_check.py "$dest/usr/local/libexec/xddp-deployment-check"
 install -m 0755 scripts/rollback.py "$dest/usr/local/sbin/xddp-rollback"
 for name in controller gate; do
     if [ ! -e "$dest/etc/xddp/$name.json" ] && [ ! -L "$dest/etc/xddp/$name.json" ]; then
@@ -37,6 +38,7 @@ for name in controller gate; do
     fi
 done
 install -m 0644 systemd/*.service "$dest/etc/systemd/system/"
+install -m 0644 systemd/*.timer "$dest/etc/systemd/system/"
 if [ -z "$dest" ]; then systemctl daemon-reload; fi
 echo 'Installed files only. No services started/enabled, no XDP attached, no ports/firewall changed.'
 echo 'Review /etc/xddp/*.json and docs/DEPLOYMENT.md before starting services.'

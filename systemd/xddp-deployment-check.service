@@ -1,0 +1,15 @@
+[Unit]
+Description=Read-only XDDP deployment telemetry
+After=xddp-controller.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/libexec/xddp-deployment-check --quiet --textfile /var/lib/prometheus/node-exporter/xddp-deployment.prom
+TimeoutStartSec=45
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ReadWritePaths=/var/lib/prometheus/node-exporter
+RestrictAddressFamilies=AF_UNIX

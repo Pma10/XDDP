@@ -1,0 +1,70 @@
+{
+  "groups": [
+    {
+      "name": "xddp-host-pressure",
+      "rules": [
+        {
+          "alert": "XDDPConntrackPressure",
+          "expr": "node_nf_conntrack_entries{xddp=\"enabled\"} / node_nf_conntrack_entries_limit{xddp=\"enabled\"} > 0.8",
+          "for": "15s",
+          "labels": {"severity": "warning"},
+          "annotations": {"summary": "Connection tracking is over 80% on {{ $labels.instance }}", "description": "Inspect new-flow pressure and upstream mitigation. This does not identify the attacked port or source."}
+        },
+        {
+          "alert": "XDDPConntrackDropping",
+          "expr": "increase(node_nf_conntrack_stat_drop{xddp=\"enabled\"}[1m]) > 0",
+          "labels": {"severity": "critical"},
+          "annotations": {"summary": "Connection tracking is dropping packets on {{ $labels.instance }}"}
+        },
+        {
+          "alert": "XDDPListenQueueOverflow",
+          "expr": "increase(node_netstat_TcpExt_ListenOverflows{xddp=\"enabled\"}[1m]) > 0",
+          "labels": {"severity": "critical"},
+          "annotations": {"summary": "A TCP listen queue overflowed on {{ $labels.instance }}", "description": "Host-wide counter; determine the affected listener before tuning or filtering."}
+        },
+        {
+          "alert": "XDDPNetworkCpuPressure",
+          "expr": "rate(node_cpu_seconds_total{xddp=\"enabled\",mode=\"softirq\"}[1m]) > 0.7",
+          "for": "30s",
+          "labels": {"severity": "warning"},
+          "annotations": {"summary": "CPU {{ $labels.cpu }} spends over 70% in softirq on {{ $labels.instance }}"}
+        },
+        {
+          "alert": "XDDPControllerTelemetryMissing",
+          "expr": "(up{xddp=\"enabled\"} == 1) unless on(job, instance) xddp_controller_last_update_unix",
+          "for": "1m",
+          "labels": {"severity": "warning"},
+          "annotations": {"summary": "Node Exporter is up but XDDP telemetry is missing on {{ $labels.instance }}", "description": "Check the controller and its textfile collector. Missing telemetry does not prove the service is stopped."}
+        },
+        {
+          "alert": "XDDPControllerTelemetryStale",
+          "expr": "time() - xddp_controller_last_update_unix{xddp=\"enabled\"} > 45",
+          "for": "15s",
+          "labels": {"severity": "warning"},
+          "annotations": {"summary": "XDDP controller telemetry is stale on {{ $labels.instance }}"}
+        },
+        {
+          "alert": "XDDPAttachmentMissingOrUnknown",
+          "expr": "xddp_deployment_xdp_attached{xddp=\"enabled\"} != 1",
+          "for": "30s",
+          "labels": {"severity": "warning"},
+          "annotations": {"summary": "XDP is absent or unknown on {{ $labels.instance }}", "description": "An active controller service alone does not mean XDP is attached. Check deployment before assuming protection."}
+        },
+        {
+          "alert": "XDDPDeploymentCheckFailed",
+          "expr": "(xddp_deployment_check_success{xddp=\"enabled\"} == 0) or (time() - xddp_deployment_last_check_unix{xddp=\"enabled\"} > 90)",
+          "for": "30s",
+          "labels": {"severity": "warning"},
+          "annotations": {"summary": "XDDP deployment check failed or stopped on {{ $labels.instance }}"}
+        },
+        {
+          "alert": "XDDPExpectedEnforcementUnconfigured",
+          "expr": "(xddp_deployment_observe{xddp_enforcement=\"required\"} != 0) or (xddp_deployment_owned_destination_count{xddp_enforcement=\"required\"} == 0) or (xddp_deployment_syn_rate_per_cpu{xddp_enforcement=\"required\"} == 0)",
+          "for": "30s",
+          "labels": {"severity": "warning"},
+          "annotations": {"summary": "Expected SYN mitigation is unconfigured on {{ $labels.instance }}", "description": "Only mark targets xddp_enforcement=required after approving an enforcing SYN policy. Observation deployments intentionally remain unarmed."}
+        }
+      ]
+    }
+  ]
+}

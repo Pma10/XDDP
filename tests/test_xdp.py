@@ -177,6 +177,16 @@ class XDPTests(unittest.TestCase):
         self.assertEqual(set(p.name for p in self.pin.iterdir()),
                          {"configuration","counters","syn_budget","ports","owned","allow","block","program"})
 
+    def test_reconnect_burst_and_exhaustion_leave_existing_tcp_untouched(self):
+        # A packet fixture, not a real-player capacity or latency certification.
+        self.configure(rate=128,burst=512)
+        for _ in range(120):
+            self.assertEqual(self.run_packet(tcp(flags=2)),2)
+        self.configure(rate=1,burst=1)
+        self.assertIn(1,[self.run_packet(tcp(flags=2)) for _ in range(64)])
+        for flags in (0x10,0x18,0x11,0x14,0x12,0x04):
+            self.assertEqual(self.run_packet(tcp(flags=flags)),2)
+
 
 if __name__ == "__main__":
     unittest.main()
