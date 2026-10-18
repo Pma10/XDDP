@@ -52,8 +52,11 @@ def replay(config, samples):
         signals = rates(previous, current, time - last)
         suggested = adaptive.sample(signals, time)
         mode = suggested if cfg["manual_mode"] == "auto" else MODES.index(cfg["manual_mode"])
+        effective = (adaptive.syn_budget(cfg["syn_per_cpu"]) if cfg["manual_mode"] == "auto"
+                     else cfg["syn_per_cpu"][MODES[mode]])
         rows.append({"time":time, "mode":MODES[mode], "signals":signals,
-                     "syn_per_cpu":dict(cfg["syn_per_cpu"][MODES[mode]])})
+                     "recovery_stage":adaptive.recovery_stage() if cfg["manual_mode"] == "auto" else 0,
+                     "syn_per_cpu":dict(effective)})
         previous, last = current, time
     return {"observe":cfg["observe"], "manual_mode":cfg["manual_mode"], "samples":len(rows),
             "first_attack_time":next((r["time"] for r in rows if r["mode"] in ("attack","emergency")), None),

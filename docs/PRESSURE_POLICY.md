@@ -101,3 +101,79 @@ Apply only through the [deployment procedure](DEPLOYMENT.md). Updating the Pytho
 controller/config needs its controlled restart; updating gate static budgets is
 a separate operation that disconnects its existing relays. Do not restart the gate
 to install this controller-only strategy.
+
+## Guarded FREEZE and graduated reopening (opt-in)
+
+XDP **ABI v2** already freezes *new initial TCP SYN* to explicitly protected
+owned destinations during enforced EMERGENCY. Established ACK/PSH/FIN continue
+through XDP; this is not a stateful conntrack classifier or guarantee against
+upstream saturation and established-packet floods.
+
+To auto-freeze, `adaptive.allow_emergency=true` must have calibrated EMERGENCY
+entry/exit thresholds and a `required_signals.emergency` guard that combines a
+connection anomaly (such as `syn_per_second`) with independent resource pressure
+(such as `conntrack_percent` or a *measured* `listen_overflows_per_second`).
+A lone PPS spike cannot automatically freeze every new player. Host-wide
+overflows need service attribution before setting thresholds.
+
+**Optional** graduated reopening uses the following fields inside the existing
+`adaptive` object (illustrative **per-CPU** rates, not production thresholds):
+
+```json
+"recovery": {
+  "enabled": true,
+  "stages": [
+    {"seconds": 20, "rate": 16, "burst": 32},
+    {"seconds": 30, "rate": 64, "burst": 128}
+  ]
+}
+```
+
+Requires automatic EMERGENCY plus guarded EMERGENCY and ATTACK thresholds. Stage
+rates and bursts must be positive, nondecreasing and at most the configured
+ATTACK SYN budget. Up to four bounded stages are supported.
+
+After the established EMERGENCY exit hysteresis and cooldown, the controller
+returns to ATTACK mode while publishing the smallest stage SYN rate/burst to
+the existing XDP v2 map. The Gate sees ATTACK and keeps applying its usual
+admission rules. Each stage advances only after the given duration *and* all
+ATTACK exit signals are present and below their exit bands. Missing telemetry
+or worsening pressure resets the timer and rate to stage one. Confirmed
+EMERGENCY thresholds may re-freeze during a probe; otherwise after the last
+stage the normal ATTACK budget resumes, followed by ELEVATED and NORMAL as
+per the original exit logic.
+
+`ddosctl status` exposes `recovery_stage` (0 when inactive) and the **effective**
+`configured_syn_per_cpu`; Prometheus provides
+`xddp_controller_recovery_stage`. Offline pressure replay includes each stage
+and effective SYN budgets. XDP resets a per-CPU bucket to that stage's burst
+when the rate changes, so the budgets are *not* global connection caps.
+Controller restarts reset the in-memory probe stage to NORMAL under the
+existing fail-open lease contract.
+
+**The feature is disabled by default**. The pressure example keeps
+`allow_emergency=false`, `recovery.enabled=false`, and no owned prefixes.
+A controller code/config upgrade uses a controlled controller restart but
+**must not restart the Gate**, since stopping it disconnects live relays.
+
+## Server-list ping, incomplete handshakes, and cached MOTD
+
+The Rust Gate handles server-list Status Request/Ping locally using a
+five-second cache in the operator configuration. A single background refresh
+task polls the backend; client cache misses do not trigger extra backend
+connections. A valid status client may close after Status Response without
+being penalized for omitting Ping. The cache is not by itself a defense
+against TCP accepts that never complete the Minecraft handshake.
+
+Incomplete/slowly fragmented handshakes consume prelogin resources until
+initial-progress/progress/absolute-handshake deadlines expire. A status-only
+capacity cap applies **after** a valid status handshake. Clients that stop
+before completing handshake are counted in the shared prelogin cap.
+
+Available per-source controls: `limits.prelogin_ip`,
+`limits.prelogin_prefix`, `limits.status_ip` and `limits.ip.status`,
+`limits.prefix.status`, `limits.global.status`, with analogous connect
+budgets. All rate budgets default disabled (0). Calibrate first against
+legitimate carrier-grade NAT connections: a per-IP rule can inadvertently
+reject legitimate players from shared exits. Gate static config changes
+require a maintenance restart and **disconnect currently relayed players**.
