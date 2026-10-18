@@ -438,7 +438,8 @@ mod tests {
         let other: IpAddr = "192.0.2.2".parse().unwrap();
         assert!(l.accept(other,p).is_none());
         let ip=l.ip.shards[l.ip.shard(other)].lock().unwrap();
-        assert_eq!(ip[&other].buckets[0].tokens,1.0);
+        // A globally rejected new identity must not be inserted into the source table.
+        assert!(!ip.contains_key(&other));
         drop(ip);
         let prefix="192.0.2.0".parse().unwrap();
         let net=l.prefix.shards[l.prefix.shard(prefix)].lock().unwrap();
