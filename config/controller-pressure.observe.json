@@ -1,7 +1,7 @@
 {
   "interface": "eth0",
   "xdp_mode": "driver",
-  "pin_dir": "/sys/fs/bpf/xddp/v1",
+  "pin_dir": "/sys/fs/bpf/xddp/v2-pressure-staging",
   "object": "/usr/local/lib/xddp/xdp_ddos.bpf.o",
   "loader": "/usr/local/libexec/xddp-loader",
   "socket": "/run/xddp/control.sock",
@@ -82,6 +82,21 @@
       "attack": [
         "conntrack_drops_per_second",
         "listen_overflows_per_second"
+      ]
+    },
+    "recovery": {
+      "enabled": false,
+      "stages": [
+        {
+          "seconds": 20,
+          "rate": 16,
+          "burst": 32
+        },
+        {
+          "seconds": 30,
+          "rate": 64,
+          "burst": 128
+        }
       ]
     }
   }

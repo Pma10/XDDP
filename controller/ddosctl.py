@@ -62,7 +62,8 @@ class Controller:
     def lease(self, seconds=None):
         c = self.cfg
         seconds = c["lease_seconds"] if seconds is None else seconds
-        budget = c["syn_per_cpu"][MODES[self.mode]]
+        budget = (self.adaptive.syn_budget(c["syn_per_cpu"])
+                  if c["manual_mode"] == "auto" else c["syn_per_cpu"][MODES[self.mode]])
         self.loader("config", c["pin_dir"], time.monotonic_ns() + int(seconds * 1e9) if seconds else 0,
                     int(c["observe"]), self.mode, int(c["ipv6"]), int(c["drop_tcp_fragments"]),
                     budget["rate"], budget["burst"], 2)
@@ -154,7 +155,9 @@ class Controller:
         for name,value in self.signals.items():
             text.append(f"xddp_observed_{name} {value}")
         text.extend([f"xddp_controller_history_write_errors {self.history_errors}",
-                     f"xddp_controller_mode {self.mode}", f"xddp_controller_observe {int(self.cfg['observe'])}",
+                     f"xddp_controller_mode {self.mode}",
+                     f"xddp_controller_recovery_stage {self.adaptive.recovery_stage() if self.cfg['manual_mode'] == 'auto' else 0}",
+                     f"xddp_controller_observe {int(self.cfg['observe'])}",
                      f"xddp_controller_last_update_unix {int(time.time())}"])
         atomic(self.cfg["metrics_file"],"\n".join(text)+"\n")
 
@@ -167,7 +170,9 @@ class Controller:
     def command(self, args):
         if args == ["status"]:
             return dict(mode=MODES[self.mode],observe=self.cfg["observe"],signals=self.signals,
-                        configured_syn_per_cpu=self.cfg["syn_per_cpu"][MODES[self.mode]],
+                        configured_syn_per_cpu=(self.adaptive.syn_budget(self.cfg["syn_per_cpu"])
+                            if self.cfg["manual_mode"] == "auto" else self.cfg["syn_per_cpu"][MODES[self.mode]]),
+                        recovery_stage=(self.adaptive.recovery_stage() if self.cfg["manual_mode"] == "auto" else 0),
                         configured_owned_prefixes=len(self.cfg["owned_prefixes"]),
                         configured_protected_tcp_ports=self.cfg["protected_tcp_ports"],
                         gate_metrics_available=self.snapshot.get("gate_metrics_available",False),

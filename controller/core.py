@@ -167,7 +167,7 @@ def validate(cfg):
             raise ValueError("SYN rate and burst must both be zero or positive")
     a = cfg["adaptive"]
     required = {"up_samples", "down_samples", "cooldown_seconds", "thresholds"}
-    if not required <= set(a) or set(a) - required - {"required_signals", "immediate_signals", "allow_emergency", "up_cooldown_seconds"}:
+    if not required <= set(a) or set(a) - required - {"required_signals", "immediate_signals", "allow_emergency", "up_cooldown_seconds", "recovery"}:
         raise ValueError("invalid adaptive keys")
     if "up_cooldown_seconds" in a:
         positive(a["up_cooldown_seconds"], "up_cooldown_seconds", 0, 3600)
@@ -198,7 +198,9 @@ def validate(cfg):
         emergency_guards = set(emergency_names)
         traffic = {"syn_per_second", "accepts_per_second",
                    "handshakes_per_second", "churn_per_second"}
-        pressure = {"conntrack_percent", "active_prelogin",
+        pressure = {"conntrack_percent", "conntrack_projected_percent", "conntrack_growth_per_second",
+                    "conntrack_drops_per_second", "listen_overflows_per_second",
+                    "listen_drops_per_second", "active_prelogin",
                     "backend_connections", "resource_limited_per_second"}
         if not (emergency_guards & traffic and emergency_guards & pressure
                 and len(emergency_guards) >= 2):
@@ -218,6 +220,35 @@ def validate(cfg):
             if (not isinstance(names, list) or any(not isinstance(n, str) for n in names)
                     or len(names) != len(set(names)) or not set(names) <= set(thresholds)):
                 raise ValueError("required/immediate signals must be unique configured threshold names")
+    # Bounded recovery uses the existing XDP ABI v2 / ATTACK mode.
+    recovery = a.get("recovery")
+    if recovery is not None:
+        if not isinstance(recovery, dict) or set(recovery) != {"enabled", "stages"}:
+            raise ValueError("recovery needs enabled and stages")
+        if type(recovery["enabled"]) is not bool or not isinstance(recovery["stages"], list):
+            raise ValueError("invalid recovery policy")
+        stages = recovery["stages"]
+        if not 1 <= len(stages) <= 4:
+            raise ValueError("recovery must have 1..4 bounded stages")
+        last_rate = last_burst = 0
+        attack = cfg["syn_per_cpu"]["attack"]
+        for stage in stages:
+            if not isinstance(stage, dict) or set(stage) != {"seconds", "rate", "burst"}:
+                raise ValueError("invalid recovery stage keys")
+            for name, maximum in (("seconds", 3600), ("rate", 1_000_000_000), ("burst", 1_000_000)):
+                value = stage[name]
+                positive(value, name, 1, maximum)
+                if type(value) is not int:
+                    raise ValueError("recovery stage must use positive integers")
+            if stage["rate"] < last_rate or stage["burst"] < last_burst:
+                raise ValueError("recovery stages must only expand admission")
+            last_rate, last_burst = stage["rate"], stage["burst"]
+            if recovery["enabled"] and (stage["rate"] > attack["rate"] or stage["burst"] > attack["burst"]):
+                raise ValueError("recovery budget cannot exceed ATTACK budget")
+        if recovery["enabled"] and (not a.get("allow_emergency", False)
+                                    or not a["thresholds"]["emergency"]
+                                    or not a["thresholds"]["attack"]):
+            raise ValueError("automatic recovery requires guarded EMERGENCY and ATTACK thresholds")
     # Check both writer formats before any map, persistent config or lease change.
     bounded_json(cfg, indent=2)
     runtime_document(cfg, (1 << 64)-1, (1 << 64)-1, 3)
@@ -231,6 +262,24 @@ class Adaptive:
         self.changed = now
         self.up = self.down = 0
         self.target = 0
+        self.recovery_index = -1
+        self.recovery_since = now
+
+    def recovery_stage(self):
+        return self.recovery_index + 1  # 0 means inactive
+
+    def syn_budget(self, budgets):
+        if self.mode == 2 and self.recovery_index >= 0:
+            stage = self.cfg["recovery"]["stages"][self.recovery_index]
+            return {"rate": stage["rate"], "burst": stage["burst"]}
+        return budgets[MODES[self.mode]]
+
+    def _recovery_healthy(self, signals):
+        # Missing or non-finite telemetry cannot justify wider admissions.
+        bands = self.cfg["thresholds"]["attack"]
+        return bool(bands) and all(name in signals and math.isfinite(signals[name])
+                                   and signals[name] <= band["exit"]
+                                   for name, band in bands.items())
 
     def sample(self, signals, now):
         target = 0
@@ -249,7 +298,25 @@ class Adaptive:
             # Explicit kernel-failure signals can bypass entry debounce/cooldown.
             # Required guards and emergency opt-in above still apply.
             self.mode, self.changed = immediate_target, now
+            if self.mode == 3:
+                self.recovery_index = -1
             self.up = self.down = self.target = 0
+            return self.mode
+        if self.mode == 2 and self.recovery_index >= 0 and target < 3:
+            # Gradually reopen only after fresh, healthy ATTACK exit signals.
+            # Any missing/overloaded sample resets the trial to minimum rate.
+            if not self._recovery_healthy(signals):
+                self.recovery_index = 0
+                self.recovery_since = now
+            else:
+                stage = self.cfg["recovery"]["stages"][self.recovery_index]
+                if now - self.recovery_since >= stage["seconds"]:
+                    self.recovery_index += 1
+                    self.recovery_since = now
+                    if self.recovery_index == len(self.cfg["recovery"]["stages"]):
+                        self.recovery_index = -1
+            self.up = self.down = 0
+            self.target = target
             return self.mode
         if target > self.mode:
             self.up = self.up + 1 if self.target == target else 1
@@ -260,6 +327,8 @@ class Adaptive:
             up_cooldown = self.cfg.get("up_cooldown_seconds", self.cfg["cooldown_seconds"])
             if self.up >= self.cfg["up_samples"] and now - self.changed >= up_cooldown:
                 self.mode, self.changed, self.up = target, now, 0
+                if self.mode == 3:
+                    self.recovery_index = -1
         else:
             self.up = 0
             bands = self.cfg["thresholds"].get(MODES[self.mode], {})
@@ -267,8 +336,13 @@ class Adaptive:
             cool = bool(bands) and all(n in signals and math.isfinite(signals[n]) and signals[n] <= b["exit"] for n, b in bands.items())
             self.down = self.down + 1 if cool else 0
             if self.mode and self.down >= self.cfg["down_samples"] and now - self.changed >= self.cfg["cooldown_seconds"]:
+                previous_mode = self.mode
                 self.mode -= 1
                 self.changed, self.down = now, 0
+                if (previous_mode == 3 and self.mode == 2
+                        and self.cfg.get("recovery", {}).get("enabled", False)):
+                    self.recovery_index = 0
+                    self.recovery_since = now
         return self.mode
 
 
