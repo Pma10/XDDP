@@ -1,7 +1,7 @@
 {
   "interface": "eth0",
   "xdp_mode": "driver",
-  "pin_dir": "/sys/fs/bpf/xddp/v1",
+  "pin_dir": "/sys/fs/bpf/xddp/v2",
   "object": "/usr/local/lib/xddp/xdp_ddos.bpf.o",
   "loader": "/usr/local/libexec/xddp-loader",
   "socket": "/run/xddp/control.sock",

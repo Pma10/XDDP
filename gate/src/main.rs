@@ -81,10 +81,11 @@ async fn run(cfg:Config) -> Result<(),Box<dyn std::error::Error>> {
                     s.metrics.inc(26); tokio::time::sleep(Duration::from_millis(100)).await; continue; } };
                 s.metrics.inc(0);
                 let (policy,blocked) = s.runtime.policy(peer.ip());
-                if blocked || (!policy.observe && policy.mode == 3) || !s.limiter.global(Event::Connect,policy) { continue; }
+                if blocked || (!policy.observe && policy.mode == 3) { continue; }
                 let (Ok(socket),Ok(pre)) = (s.sockets.clone().try_acquire_owned(),s.prelogin.clone().try_acquire_owned()) else {
                     s.metrics.inc(20); continue;
                 };
+                // Charge shared connect capacity only after resource and identity checks.
                 let Some(ticket) = s.limiter.accept(peer.ip(),policy) else { continue; };
                 let state = s.clone();
                 let active = Gauge::new(s.metrics.clone(),1);

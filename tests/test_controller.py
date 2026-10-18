@@ -43,6 +43,27 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(c=c),self.assertRaises(ValueError):
                 validate(c)
 
+    def test_auto_emergency_requires_independent_pressure_and_connection_signals(self):
+        def policy(required, bands):
+            cfg=copy.deepcopy(self.cfg)
+            cfg["adaptive"]["allow_emergency"]=True
+            cfg["adaptive"]["required_signals"]={"emergency":required}
+            cfg["adaptive"]["thresholds"]["emergency"]={
+                s:{"enter":100,"exit":50} for s in bands}
+            return cfg
+        for required, bands in [
+            ([],["pps"]),
+            (["syn_per_second"],["syn_per_second"]),
+            (["pps","conntrack_percent"],["pps","conntrack_percent"]),
+            (["syn_per_second","bps"],["syn_per_second","bps"]),
+            (["syn_per_second","unknown"],["syn_per_second","conntrack_percent"])]:
+            with self.subTest(required=required),self.assertRaises(ValueError):
+                validate(policy(required,bands))
+        for required in (["syn_per_second","conntrack_percent"],
+                         ["churn_per_second","active_prelogin"]):
+            with self.subTest(required=required):
+                validate(policy(required,required))
+
     def test_cidr_canonicalization(self):
         self.cfg["allow_prefixes"] = ["192.0.2.7/24","192.0.2.0/24"]
         self.assertEqual(validate(self.cfg)["allow_prefixes"],["192.0.2.0/24"])
@@ -129,6 +150,30 @@ class ModeTests(unittest.TestCase):
         self.cfg["allow_emergency"]=True
         a.sample({"active_prelogin":100},30)
         self.assertEqual(a.sample({"active_prelogin":100},31),3)
+
+    def test_emergency_freeze_staged_recovery_requires_low_fresh_signals(self):
+        cfg=dict(up_samples=2,down_samples=2,cooldown_seconds=2,
+            allow_emergency=True,
+            required_signals={"emergency":["syn_per_second","conntrack_percent"]},
+            thresholds={
+                "elevated":{"syn_per_second":{"enter":10,"exit":4}},
+                "attack":{"syn_per_second":{"enter":20,"exit":8}},
+                "emergency":{"syn_per_second":{"enter":50,"exit":25},
+                             "conntrack_percent":{"enter":70,"exit":30}}})
+        adaptive=Adaptive(cfg,0)
+        high={"syn_per_second":100,"conntrack_percent":95}
+        self.assertEqual(adaptive.sample(high,1),0)
+        self.assertEqual(adaptive.sample(high,2),3)
+        # A telemetry gap must not justify reopening the service.
+        for now in (3,4,5):
+            self.assertEqual(adaptive.sample({},now),3)
+        low={"syn_per_second":1,"conntrack_percent":1}
+        self.assertEqual(adaptive.sample(low,6),3)
+        self.assertEqual(adaptive.sample(low,7),2)
+        self.assertEqual(adaptive.sample(low,8),2)
+        self.assertEqual(adaptive.sample(low,9),1)
+        self.assertEqual(adaptive.sample(low,10),1)
+        self.assertEqual(adaptive.sample(low,11),0)
 
     def test_pressure_gauges_and_failure_rates(self):
         self.assertEqual(rates({"backend_connect_failures":4,"resource_limited":2},

@@ -21,10 +21,23 @@ concurrency caps: observation does not mean forwarding malformed streams to Java
 No logging is performed per rejected packet or client.
 
 NORMAL/ELEVATED/ATTACK select configured SYN budgets and admission multipliers.
+In EMERGENCY with a valid XDP lease and `observe=false`, XDP drops initial
+TCP SYNs for owned protected services before conntrack, **even for allowlisted
+addresses**, while passing normal ACK/PSH/FIN and SYN-ACK traffic to Linux.
+`candidate_drop{reason="emergency_syn"}` distinguishes this from ordinary
+SYN rate limiting. It is not a stateful established-connection verifier;
+spoofed ACK floods, IPv6 extension chains, fragments and upstream saturation
+remain separate risks. EMERGENCY intentionally prevents *all* new connections
+(including legitimate players) to protected services. Existing gate relays are
+not closed by a mode change. After EMERGENCY the existing one-step de-escalation
+reopens admission through ATTACK -> ELEVATED -> NORMAL when those modes have
+suitable validated recovery thresholds and SYN budgets.
+
 Rate reductions affect connect/handshake/status/login, never relays. In enforced
 EMERGENCY no new client is admitted, including an allow-listed client. Prefix
 allow-listing exempts source/prefix rate/penalty/deny policy, not hard caps or
-global rate limits. Empty/zero rate configuration stays disabled in every mode.
+global rate limits. Empty/zero rate configuration stays disabled for SYN token buckets in all modes;
+EMERGENCY's dedicated new-SYN freeze does not require a nonzero token bucket.
 The sample nonzero multipliers only scale operator-configured rates; they are
 not production thresholds. All actual rates/transition thresholds require data.
 
@@ -36,7 +49,13 @@ that mode. This permits traffic plus resource-pressure corroboration, rather tha
 using raw interface PPS alone. Missing required signals prevent escalation.
 `adaptive.allow_emergency` defaults to **false**, including when omitted from old
 configurations: automatic escalation stops at ATTACK unless explicitly enabled.
-Manual EMERGENCY remains available. Escalation requires
+Manual EMERGENCY remains available. When `allow_emergency=true`, configuration
+validation requires `required_signals.emergency` to include both a connection
+anomaly (SYN/accept/handshake/churn rate) and independent resource pressure
+(conntrack/prelogin/backend occupancy or resource-limit rate), with corresponding
+configured bands. A lone PPS surge cannot automatically freeze the service.
+The thresholds must be calibrated against normal login/restart bursts.
+Escalation requires
 consecutive samples and cooldown. De-escalation requires every signal configured
 for the current mode to be present and below `exit`, consecutive samples and
 cooldown, then decreases one mode. Missing telemetry cannot itself escalate or
@@ -57,9 +76,17 @@ production thresholds are provided.
 
 Controller leases use CLOCK_MONOTONIC-compatible nanoseconds for XDP. Gate state
 combines a short wall-clock expiry with a local monotonic receipt deadline and a
-changing generation. Unchanged files do not renew leases. With a nonempty
+changing generation. Unchanged files do not renew leases. Older runtime generations are rejected after a newer generation has been observed, preventing a stale file replay from restoring older block/mode settings. With a nonempty
 `runtime_file`, missing/stale controller state means NORMAL/observation; set
 `runtime_file=""` only for standalone gate operation governed by `observe`.
+
+
+`ddosctl status` also reports `configured_syn_per_cpu` (rate and burst for
+the current mode), `configured_owned_prefixes` (count) and
+`configured_protected_tcp_ports`. These reflect the controller's configuration,
+**not** confirmation that a BPF program is attached, that enforcement is enabled,
+or that a rate has been calibrated. Check `ddosctl xdp status` and `observe`
+separately; `rate=0` disables SYN limiting.
 
 ## Admission bounds
 
@@ -125,9 +152,12 @@ players or their shared NAT. Malformed or incomplete client input still counts.
 Handshake/status/login tokens are charged only after IP, prefix and global policy
 accepts the event. An enforced source rejection cannot spend a shared prefix or
 global event budget. Source-exempt clients spend only the global event budget.
-Connect IP/prefix tokens likewise commit together; the separate global accept
-guard still counts incoming accepts before allocating identity state, including
-clients later rejected by source policy. Observation records candidates and
+Connect IP/prefix/global tokens also commit together, after a socket and
+prelogin slot have been reserved and identity/concurrency policy has passed.
+Connections rejected by source policy, identity-table pressure, or resource caps
+do not consume the shared global connect budget. Source-exempt clients still
+consume global connect tokens. These changes protect fair admission, not kernel
+SYN backlog or conntrack, which occur before the Rust gate. Observation records candidates and
 charges available buckets without creating token debt.
 
 ## Minecraft compatibility

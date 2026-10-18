@@ -36,7 +36,7 @@ build/xddp-loader load build/xdp_ddos.bpf.o "$pin"
 build/xddp-loader prefix "$pin" owned add 192.0.2.1/32 1
 build/xddp-loader port "$pin" 25565 1
 deadline=$(python3 -c 'import time; print(time.monotonic_ns()+60_000_000_000)')
-build/xddp-loader config "$pin" "$deadline" 0 0 0 0 0 0 1
+build/xddp-loader config "$pin" "$deadline" 0 0 0 0 0 0 2
 nsenter --net="/run/netns/$server" -- "$(pwd)/build/xddp-loader" attach "$right" "$pin" driver confirmed
 ip netns exec "$client" ping -c 3 -W 1 -M do -s 1372 192.0.2.1
 nsenter --net="/run/netns/$server" -- "$(pwd)/build/xddp-loader" status "$right" driver
