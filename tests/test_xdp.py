@@ -229,7 +229,7 @@ class XDPTests(unittest.TestCase):
         other = bytearray(raw)
         other[38:54] = foreign
         self.assertEqual(self.run_packet(other), 2)
-        self.loader("config",self.pin,time.monotonic_ns()+int(60e9),0,0,0,0,0,0,1)
+        self.loader("config",self.pin,time.monotonic_ns()+int(60e9),0,0,0,0,0,0,2)
         self.assertEqual(self.run_packet(raw),2)
         self.configure()
 
