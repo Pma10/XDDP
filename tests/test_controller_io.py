@@ -158,6 +158,29 @@ class ControllerIOTests(unittest.TestCase):
         self.assertEqual(self.controller.snapshot["attached"],-1)
         self.assertEqual(self.calls[-1][0],"config")
 
+    def test_kernel_queue_failure_selects_attack_syn_budget_without_syn_signal(self):
+        from core import Adaptive
+        profile=json.loads((ROOT/"config/controller-pressure.observe.json").read_text())
+        self.controller.cfg.update(adaptive=profile["adaptive"],syn_per_cpu=profile["syn_per_cpu"],manual_mode="auto")
+        self.controller.adaptive=Adaptive(profile["adaptive"],0)
+        def loader(*args):
+            self.calls.append(args)
+            if args[0]=="stats": return {"candidate_reasons":{}}
+            if args[0]=="status": return {"program_id":42}
+            return {}
+        self.controller.loader=loader
+        with patch("ddosctl.time.monotonic",side_effect=[100.,101.]), \
+             patch("ddosctl.host_pressure",return_value={"conntrack_entries":400,"conntrack_limit":1000,"conntrack_percent":40}), \
+             patch("ddosctl.host_network_counters",side_effect=[{"host_listen_overflow_total":100},{"host_listen_overflow_total":110}]), \
+             patch.object(self.controller,"gate_counters",return_value={}):
+            self.controller.tick()
+            self.controller.tick()
+        self.assertEqual(self.controller.mode,2)
+        self.assertEqual(self.calls[-1][0],"config")
+        self.assertEqual(self.calls[-1][3:5],(1,2))  # observation is unchanged
+        self.assertEqual(self.calls[-1][7:9],(128,512))
+        self.assertNotIn("syn_per_second",self.controller.signals)
+
 
 if __name__ == "__main__":
     unittest.main()

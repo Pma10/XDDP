@@ -17,7 +17,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(host_pressure(root),{})
             (root/"nf_conntrack_count").write_text("75\n")
             (root/"nf_conntrack_max").write_text("100\n")
-            self.assertEqual(host_pressure(root),{"conntrack_percent":75})
+            self.assertEqual(host_pressure(root),{"conntrack_percent":75,"conntrack_entries":75,"conntrack_limit":100})
             (root/"nf_conntrack_max").write_text("0\n")
             self.assertEqual(host_pressure(root),{})
             (root/"nf_conntrack_max").write_text("9"*65)

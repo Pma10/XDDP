@@ -23,7 +23,9 @@ def runtime_document(cfg, generation, expires_unix, mode):
 SIGNALS = {"pps", "bps", "syn_per_second", "accepts_per_second", "handshakes_per_second",
            "status_per_second", "logins_per_second", "churn_per_second", "active_prelogin",
            "new_ip_entries_per_second", "new_prefix_entries_per_second", "active_status",
-           "backend_connections", "backend_failures_per_second", "resource_limited_per_second", "conntrack_percent"}
+           "backend_connections", "backend_failures_per_second", "resource_limited_per_second", "conntrack_percent",
+           "conntrack_projected_percent", "conntrack_growth_per_second", "conntrack_drops_per_second",
+           "listen_overflows_per_second", "listen_drops_per_second", "syncookies_per_second"}
 
 
 def host_pressure(root=Path("/proc/sys/net/netfilter")):
@@ -39,9 +41,64 @@ def host_pressure(root=Path("/proc/sys/net/netfilter")):
         count, maximum=values
         if maximum<=0:
             return {}
-        return {"conntrack_percent":min(100.0,100.0*count/maximum)}
+        return {"conntrack_percent":min(100.0,100.0*count/maximum),
+                "conntrack_entries":count, "conntrack_limit":maximum}
     except (OSError, ValueError, OverflowError):
         return {}
+
+
+def _proc_lines(path):
+    with path.open("rb") as stream:
+        raw = stream.read(MAX_DOCUMENT_BYTES + 1)
+    if len(raw) > MAX_DOCUMENT_BYTES:
+        raise ValueError("proc telemetry too large")
+    return raw.decode("ascii").splitlines()
+
+
+def host_network_counters(root=Path("/proc/net")):
+    """Bounded read-only kernel counters; unavailable telemetry stays absent."""
+    result = {}
+    try:
+        lines = _proc_lines(root / "stat/nf_conntrack")
+        header = lines[0].split()
+        if len(header) != len(set(header)) or "drop" not in header or len(lines) < 2:
+            raise ValueError("invalid conntrack header")
+        index = header.index("drop")
+        dropped = 0
+        for line in lines[1:]:
+            values = line.split()
+            if len(values) != len(header):
+                raise ValueError("invalid conntrack row")
+            value = values[index]
+            if not value or any(c not in "0123456789abcdefABCDEF" for c in value):
+                raise ValueError("invalid conntrack counter")
+            dropped += int(value, 16)
+        result["host_conntrack_drop_total"] = dropped
+    except (OSError, ValueError, UnicodeError, IndexError):
+        pass
+    try:
+        lines = _proc_lines(root / "netstat")
+        names = {"ListenOverflows":"host_listen_overflow_total",
+                 "ListenDrops":"host_listen_drop_total", "SyncookiesSent":"host_syncookies_sent_total"}
+        for i, line in enumerate(lines):
+            header = line.split()
+            if not header or header[0] != "TcpExt:":
+                continue
+            values = lines[i+1].split()
+            if (len(header) != len(values) or values[0] != "TcpExt:"
+                    or len(header) != len(set(header))):
+                raise ValueError("invalid TcpExt rows")
+            counters = {}
+            for name, value in zip(header[1:], values[1:]):
+                if name in names:
+                    if not value.isascii() or not value.isdecimal():
+                        raise ValueError("invalid TcpExt counter")
+                    counters[names[name]] = int(value)
+            result.update(counters)
+            break
+    except (OSError, ValueError, UnicodeError, IndexError):
+        pass
+    return result
 
 
 def positive(value, name, minimum=1, maximum=1_000_000_000):
@@ -101,7 +158,7 @@ def validate(cfg):
             raise ValueError("SYN rate and burst must both be zero or positive")
     a = cfg["adaptive"]
     required = {"up_samples", "down_samples", "cooldown_seconds", "thresholds"}
-    if not required <= set(a) or set(a) - required - {"required_signals", "allow_emergency", "up_cooldown_seconds"}:
+    if not required <= set(a) or set(a) - required - {"required_signals", "immediate_signals", "allow_emergency", "up_cooldown_seconds"}:
         raise ValueError("invalid adaptive keys")
     if "up_cooldown_seconds" in a:
         positive(a["up_cooldown_seconds"], "up_cooldown_seconds", 0, 3600)
@@ -112,6 +169,9 @@ def validate(cfg):
     guards = a.get("required_signals", {})
     if not isinstance(guards, dict) or not set(guards) <= set(MODES[1:]):
         raise ValueError("invalid required signal modes")
+    immediate = a.get("immediate_signals", {})
+    if not isinstance(immediate, dict) or not set(immediate) <= set(MODES[1:]):
+        raise ValueError("invalid immediate signal modes")
     for n in ("up_samples", "down_samples", "cooldown_seconds"):
         positive(a[n], n, 1, 3600)
         if type(a[n]) is not int:
@@ -128,10 +188,11 @@ def validate(cfg):
             positive(bands["exit"], name, 0)
             if bands["exit"] >= bands["enter"]:
                 raise ValueError("exit must be below enter")
-        names = guards.get(mode, [])
-        if (not isinstance(names, list) or any(not isinstance(n, str) for n in names)
-                or len(names) != len(set(names)) or not set(names) <= set(thresholds)):
-            raise ValueError("required signals must be unique configured threshold names")
+        for options in (guards, immediate):
+            names = options.get(mode, [])
+            if (not isinstance(names, list) or any(not isinstance(n, str) for n in names)
+                    or len(names) != len(set(names)) or not set(names) <= set(thresholds)):
+                raise ValueError("required/immediate signals must be unique configured threshold names")
     # Check both writer formats before any map, persistent config or lease change.
     bounded_json(cfg, indent=2)
     runtime_document(cfg, (1 << 64)-1, (1 << 64)-1, 3)
@@ -148,6 +209,7 @@ class Adaptive:
 
     def sample(self, signals, now):
         target = 0
+        immediate_target = 0
         for i, mode in enumerate(MODES[1:], 1):
             if mode == "emergency" and not self.cfg.get("allow_emergency", False):
                 continue
@@ -156,6 +218,14 @@ class Adaptive:
             guards = self.cfg.get("required_signals", {}).get(mode, [])
             if high and all(n in high for n in guards):
                 target = i
+                if any(n in high for n in self.cfg.get("immediate_signals", {}).get(mode, [])):
+                    immediate_target = i
+        if immediate_target > self.mode:
+            # Explicit kernel-failure signals can bypass entry debounce/cooldown.
+            # Required guards and emergency opt-in above still apply.
+            self.mode, self.changed = immediate_target, now
+            self.up = self.down = self.target = 0
+            return self.mode
         if target > self.mode:
             self.up = self.up + 1 if self.target == target else 1
             self.target = target
@@ -178,7 +248,7 @@ class Adaptive:
 
 
 def rates(previous, current, dt):
-    if not previous or dt <= 0:
+    if not previous or not math.isfinite(dt) or dt <= 0:
         return {}
     result = {}
     counter_names = {"rx_packets": "pps", "rx_bytes": "bps", "syn_packets": "syn_per_second",
@@ -187,11 +257,23 @@ def rates(previous, current, dt):
                      "churn": "churn_per_second", "new_ip_entries": "new_ip_entries_per_second",
                      "new_prefix_entries": "new_prefix_entries_per_second",
                      "backend_connect_failures": "backend_failures_per_second",
-                     "resource_limited": "resource_limited_per_second"}
+                     "resource_limited": "resource_limited_per_second",
+                     "host_conntrack_drop_total":"conntrack_drops_per_second",
+                     "host_listen_overflow_total":"listen_overflows_per_second",
+                     "host_listen_drop_total":"listen_drops_per_second",
+                     "host_syncookies_sent_total":"syncookies_per_second"}
     for counter, signal in counter_names.items():
         if counter in current and counter in previous and current[counter] >= previous[counter]:
             result[signal] = (current[counter] - previous[counter]) / dt * (8 if signal == "bps" else 1)
     for gauge in ("active_prelogin", "active_status", "backend_connections", "conntrack_percent"):
         if gauge in current:
             result[gauge] = current[gauge]
+    count, old_count = current.get("conntrack_entries"), previous.get("conntrack_entries")
+    maximum = current.get("conntrack_limit")
+    if (type(count) is int and type(old_count) is int and type(maximum) is int and maximum > 0
+            and min(count, old_count) >= 0 and previous.get("conntrack_limit") == maximum):
+        growth = max(0.0, (count - old_count) / dt)
+        result["conntrack_growth_per_second"] = growth
+        # A short-horizon estimate, not a prediction of attack identity/capacity.
+        result["conntrack_projected_percent"] = min(100.0, 100.0 * (count + 10 * growth) / maximum)
     return result

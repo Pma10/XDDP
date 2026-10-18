@@ -14,7 +14,7 @@ import sys
 import time
 import urllib.request
 
-from core import Adaptive, MODES, rates, validate, bounded_json, runtime_document, host_pressure
+from core import Adaptive, MODES, rates, validate, bounded_json, runtime_document, host_pressure, host_network_counters
 
 
 def atomic(path, data, mode=0o644):
@@ -102,6 +102,7 @@ class Controller:
         now = time.monotonic()
         current = self.loader("stats",self.cfg["pin_dir"])
         current.update(host_pressure())
+        current.update(host_network_counters())
         self.snapshot = copy.deepcopy(current)
         # Status is a read-only netlink query. Unknown attachment is not zero
         # traffic, and failure here must not prevent normal lease publication.

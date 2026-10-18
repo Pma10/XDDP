@@ -141,6 +141,7 @@ migration plan and console access.
 - [Configuration and metrics](docs/CONFIGURATION.md)
 - [Deployment, upgrade and rollback](docs/DEPLOYMENT.md)
 - [Deployment diagnostics and Prometheus alerts](docs/MONITORING.md)
+- [Resource-pressure strategy and recorded-counter replay](docs/PRESSURE_POLICY.md)
 - [Benchmark methodology](docs/BENCHMARKS.md)
 - [Tests and execution evidence](docs/VALIDATION.md)
 - [Final defensive review and known limits](docs/DEFENSIVE_REVIEW.md)

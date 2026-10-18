@@ -302,6 +302,9 @@ limit reserves space for any nonnegative i32 protocol before publishing a refres
 
 ## Metrics
 
+For resource-pressure signals, immediate failure-driven escalation, an opt-in
+observation template and offline policy replay, see [pressure strategy](PRESSURE_POLICY.md).
+
 `adaptive.up_cooldown_seconds` optionally separates escalation timing from
 `cooldown_seconds` (which still controls recovery). Omission preserves the old
 shared cooldown. A value of zero permits escalation after `up_samples` without
