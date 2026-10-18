@@ -1,0 +1,22 @@
+[Unit]
+Description=Prepare XDDP bpffs namespace (no network attachment)
+RequiresMountsFor=/sys/fs/bpf
+Before=xddp-controller.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/xddp-prepare-bpffs
+RemainAfterExit=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_DAC_OVERRIDE
+RestrictAddressFamilies=AF_UNIX
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectSystem=strict
+ProtectKernelTunables=no
+ReadWritePaths=/sys/fs/bpf
+ProtectHome=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes

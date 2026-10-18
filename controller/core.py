@@ -111,8 +111,9 @@ def validate(cfg):
                 "metrics_file", "gate_metrics", "observe", "manual_mode", "lease_seconds", "ipv6",
                 "drop_tcp_fragments", "owned_prefixes", "protected_tcp_ports", "drop_tcp_ports",
                 "drop_udp_ports", "allow_prefixes", "block_prefixes", "bogon_prefixes", "syn_per_cpu", "adaptive"}
-    if set(cfg) != expected:
-        raise ValueError(f"configuration keys differ: {set(cfg) ^ expected}")
+    optional = {"history_file", "history_retention_days"}
+    if not expected <= set(cfg) or set(cfg) - expected - optional:
+        raise ValueError(f"configuration keys differ: {set(cfg) ^ expected ^ optional}")
     if cfg["interface"] != "eth0" or cfg["xdp_mode"] not in ("driver", "skb"):
         raise ValueError("production controller attaches only to eth0; mode must be explicit")
     if cfg["manual_mode"] not in (*MODES, "auto"):
@@ -129,6 +130,14 @@ def validate(cfg):
             raise ValueError(f"{name} must be absolute without parent traversal")
     if not cfg["pin_dir"].startswith("/sys/fs/bpf/xddp/"):
         raise ValueError("pin_dir must be an XDDP generation under /sys/fs/bpf/xddp/")
+    history_path = cfg.get("history_file", "/var/lib/xddp/history.sqlite3")
+    if (not isinstance(history_path, str) or (history_path and
+            (not history_path.startswith("/var/lib/xddp/") or
+             ".." in history_path.split("/") or "\0" in history_path))):
+        raise ValueError("history_file must be disabled or under /var/lib/xddp/")
+    retention = cfg.get("history_retention_days", 30)
+    if type(retention) is not int or not 1 <= retention <= 365:
+        raise ValueError("history_retention_days must be 1..365")
     url = urllib.parse.urlsplit(cfg["gate_metrics"])
     if url.scheme != "http" or url.hostname not in ("127.0.0.1", "::1") or url.path != "/metrics" or url.username or url.query or url.fragment:
         raise ValueError("gate_metrics must be an explicit loopback HTTP /metrics endpoint")

@@ -2,6 +2,10 @@
 Description=XDDP leased XDP controller (no automatic attachment)
 After=network.target
 RequiresMountsFor=/sys/fs/bpf
+Requires=xddp-bpffs.service
+After=xddp-bpffs.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -9,6 +13,8 @@ User=root
 Group=root
 RuntimeDirectory=xddp
 RuntimeDirectoryMode=0755
+StateDirectory=xddp
+StateDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
 ExecStartPre=/usr/local/libexec/xddp-preflight
 ExecStart=/usr/local/sbin/ddosctl --daemon
@@ -22,7 +28,7 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ProtectKernelTunables=yes
+ProtectKernelTunables=no
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes

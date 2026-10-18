@@ -31,6 +31,11 @@ jobs:
           DESTDIR="$stage" sh scripts/install.sh
           test -x "$stage/usr/local/bin/xddp-gate"
           test -x "$stage/usr/local/libexec/xddp-loader"
+          test -x "$stage/usr/local/libexec/xddp-prepare-bpffs"
+          test -f "$stage/usr/local/lib/xddp/controller/history.py"
+          test -f "$stage/etc/systemd/system/xddp-bpffs.service"
+          grep -q "StartLimitBurst=5" "$stage/etc/systemd/system/xddp-controller.service"
+          grep -q "StateDirectory=xddp" "$stage/etc/systemd/system/xddp-controller.service"
           printf '{"operator_setting":true}\n' > "$stage/etc/xddp/gate.json"
           chmod 600 "$stage/etc/xddp/gate.json"
           cp "$stage/etc/xddp/gate.json" "$stage/saved.json"

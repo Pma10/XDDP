@@ -8,6 +8,8 @@
   "runtime_file": "/run/xddp/runtime.json",
   "metrics_file": "/run/xddp/xdp.prom",
   "gate_metrics": "http://127.0.0.1:9109/metrics",
+  "history_file": "/var/lib/xddp/history.sqlite3",
+  "history_retention_days": 30,
   "observe": true,
   "manual_mode": "normal",
   "lease_seconds": 10,

@@ -18,6 +18,38 @@ Keep console/out-of-band access, the previous XDP generation and current Java
 listener configuration available. Native XDP succeeded in the operator's prior
 PASS test; the full program still requires its own verifier and integration test.
 
+## Recovering controller startup without touching game relays
+
+A controller crash loop can be caused by systemd making `/sys/fs/bpf`
+read-only inside the service even when the host mount is `rw`.
+The `xddp-bpffs.service` one-shot verifies the bpffs type and creates only
+`/sys/fs/bpf/xddp` before the controller's stricter namespace is applied.
+`ProtectKernelTunables=no` is necessary for pin writes on supported
+systemd versions; `ProtectSystem=strict` and the
+`ReadWritePaths=/sys/fs/bpf/xddp` exception remain enabled. Limiting service
+restarts to 5/60s prevents an unbounded error loop.
+
+Check *existing* `/etc/systemd/system/xddp-controller.service.d/*.conf`
+overrides before starting. An old override granting all of `/sys/fs/bpf`
+writable access takes precedence; remove it only after reviewing site-local
+changes. The archive is placed under the root-owned
+`StateDirectory=xddp` (`/var/lib/xddp`) and never copied to bpffs.
+The history CLI uses the on-disk database even with the controller stopped.
+
+On live servers, read-only checks first:
+```sh
+systemctl cat xddp-controller
+findmnt -T /sys/fs/bpf -o TARGET,FSTYPE,OPTIONS
+sudo bpftool net show
+sudo systemctl status xddp-gate --no-pager
+```
+Do not run the full installer while the gate is active; the installer
+intentionally refuses upgrades of running XDDP services. Gate stop/restart
+drops game relays after the drain deadline. Build and integration-test in
+staging, then schedule a maintenance window for binary/service updates.
+Controller-only service changes do not themselves migrate the public listener
+or attach XDP.
+
 ## Configure an observation-only XDP deployment
 
 1. Inventory `ip -br addr show dev eth0`, `ss -lntup`, nftables rules, routing,
@@ -166,6 +198,16 @@ listener first. It detaches only its own XDP, stops/disables XDDP units and remo
 installed binaries/units. It retains config, user, logs and pins for recovery.
 Delete individual unreferenced pins only after confirming no attachment uses that
 generation. Never recursively remove a shared bpffs tree.
+
+## Metrics interpretation after recovery
+
+`xddp_gate_runtime_missing_reads` counts one-second polls where the controller
+runtime file does not exist (typically before controller startup or during
+outage). `xddp_gate_runtime_rejected_reads` now counts existing files that
+are invalid/unreadable or other filesystem errors. In both cases policy
+leases still expire to observation, so missing policy is not proof of an
+attack. `ddosctl stats` exposes a nested `gate_counters` snapshot with
+live Gate metrics, separately from flat XDP counters.
 
 ## Failure matrix
 
