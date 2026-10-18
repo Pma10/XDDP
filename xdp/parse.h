@@ -35,15 +35,20 @@ static __always_inline int parse_ip(const __u8 *d, const __u8 *end,
     if (type == 0x0800) {
         if (d + off + 20 > end) return -R_MALFORMED_IPV4;
         const __u8 *ip = d + off;
+        if ((ip[0] >> 4) != 4) return -R_MALFORMED_IPV4;
+        /* A complete fixed header establishes destination ownership even
+         * when length/IHL validation subsequently fails. Otherwise fail open. */
+        p->dst.family = 4;
+        p->dst.prefixlen = 64;
+        __builtin_memcpy(p->dst.addr, ip + 16, 4);
         __u32 ihl = (ip[0] & 15) * 4;
         __u32 len = be16(ip + 2);
-        if ((ip[0] >> 4) != 4 || ihl < 20 || len < ihl ||
+        if (ihl < 20 || len < ihl ||
             d + off + ihl > end || d + off + len > end)
             return -R_MALFORMED_IPV4;
-        p->src.family = p->dst.family = 4;
-        p->src.prefixlen = p->dst.prefixlen = 64;
+        p->src.family = 4;
+        p->src.prefixlen = 64;
         __builtin_memcpy(p->src.addr, ip + 12, 4);
-        __builtin_memcpy(p->dst.addr, ip + 16, 4);
         p->proto = ip[9];
         p->fragment = (be16(ip + 6) & 0x3fff) != 0;
         p->l4 = off + ihl;
@@ -51,13 +56,15 @@ static __always_inline int parse_ip(const __u8 *d, const __u8 *end,
     } else if (type == 0x86dd) {
         if (d + off + 40 > end) return -R_OTHER;
         const __u8 *ip = d + off;
-        __u32 len = be16(ip + 4);
-        if ((ip[0] >> 4) != 6 || d + off + 40 + len > end)
-            return -R_OTHER;
-        p->src.family = p->dst.family = 6;
-        p->src.prefixlen = p->dst.prefixlen = 160;
-        __builtin_memcpy(p->src.addr, ip + 8, 16);
+        if ((ip[0] >> 4) != 6) return -R_OTHER;
+        p->dst.family = 6;
+        p->dst.prefixlen = 160;
         __builtin_memcpy(p->dst.addr, ip + 24, 16);
+        __u32 len = be16(ip + 4);
+        if (d + off + 40 + len > end) return -R_OTHER;
+        p->src.family = 6;
+        p->src.prefixlen = 160;
+        __builtin_memcpy(p->src.addr, ip + 8, 16);
         p->proto = ip[6];
         p->l4 = off + 40;
         p->ip_end = off + 40 + len;

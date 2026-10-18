@@ -62,6 +62,42 @@ sudo ddosctl xdp attach
 NAT의 실제 상태 조회 동시량을 확인한 뒤에만 설정합니다. 속도와 burst 값은
 실측값으로 정하고, 샘플의 0 값은 제한이 꺼진 상태입니다.
 
+## XDP 대상 구분과 Gate 통계
+
+XDP는 패킷의 목적지가 `owned_prefixes`에 있는지 확인한 뒤에만
+비정상 IP 헤더의 차단을 적용합니다. 대상 주소를 확정할 수 없거나
+비보호 대상인 트래픽은 통과시켜 Docker/Tailscale/기타 서비스를
+잘못 차단할 위험을 줄였습니다. `ddosctl stats`는
+`gate_counters` 필드에 Gate 누적 지표도 표시합니다.
+`runtime_missing_reads`는 컨트롤러 런타임 파일이 없는 횟수이고,
+`runtime_rejected_reads`는 존재하는 파일이 잘못됐거나 읽기 실패한 횟수입니다.
+서비스 장애를 곧바로 DDoS 탐지로 해석하지 마십시오.
+
+## 로그와 날짜별 공격 통계
+
+```sh
+sudo journalctl -u xddp-controller -n 80 --no-pager
+sudo journalctl -u xddp-gate -n 80 --no-pager
+sudo ddosctl stats
+sudo ddosctl history 2026-10-06
+sudo ddosctl history 2026-10-06 raw
+```
+
+새 컨트롤러는 분 단위 누적 통계를 `/var/lib/xddp/history.sqlite3`에 보존합니다.
+기본 보관 기간은 30일이고, 기존 `/etc/xddp/controller.json`에 새 항목이 없어도
+기본값을 사용합니다. SQLite는 IP별 차단 로그가 아니라 총계만 저장합니다.
+설치 이전 날짜의 통계는 소급 생성할 수 없습니다. 날짜는 서버 로컬 시간입니다.
+
+컨트롤러가 `Read-only file system: '/sys/fs/bpf/xddp'` 오류를 내면,
+먼저 `findmnt -T /sys/fs/bpf`와 `systemctl cat xddp-controller`를 확인하십시오.
+새 `xddp-bpffs.service`는 부팅 시 전용 디렉터리를 준비하며,
+컨트롤러는 해당 디렉터리에만 쓰기 권한을 갖습니다. 반복 실패는
+60초에 최대 다섯 번으로 제한됩니다. 기존 `override.conf`가 있으면
+업그레이드 후에도 우선 적용되므로 반드시 검토하십시오.
+
+운영 중인 `xddp-gate`를 멈추면 기존 접속자가 끊길 수 있습니다.
+**로그 조회나 컨트롤러 단독 점검을 위해 Gate를 재시작하지 마십시오.**
+
 ## 업그레이드와 제거
 
 송신 정체·반쪽 종료·백엔드 장애 반복 연결에 대한 선택적 보호 설정과

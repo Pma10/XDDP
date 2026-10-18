@@ -109,11 +109,37 @@ class XDPTests(unittest.TestCase):
 
     def test_malformed(self):
         # Kernel test-run requires >= Ethernet header; shorter fixtures run in ASan C tests.
-        for n in (14,20,33,40,53):
+        # Truncated L2 or IP headers without a validated destination must
+        # fail open, even when enforcement is on.
+        for n in (14,20,33):
+            self.assertEqual(self.run_packet(tcp()[:n]),2)
+        # Once the full fixed IP header identifies an owned destination,
+        # malformed length and TCP fields can be enforced.
+        for n in (40,53):
             self.assertEqual(self.run_packet(tcp()[:n]),1)
-        for index,value in ((14,0x44),(46,0x40),(46,0xf0),(47,3),(47,6),(47,5)):
+        for index,value in ((46,0x40),(46,0xf0),(47,3),(47,6),(47,5)):
             data = bytearray(tcp()); data[index]=value
             self.assertEqual(self.run_packet(data),1)
+        bad_ihl = bytearray(tcp()); bad_ihl[14]=0x44
+        self.assertEqual(self.run_packet(bad_ihl),1)
+        bad_version = bytearray(tcp()); bad_version[14]=0x54
+        self.assertEqual(self.run_packet(bad_version),2)
+
+    def test_unowned_malformed_packets_never_drop_unrelated_traffic(self):
+        for malformed in ("ipv4_length", "invalid_tcp", "truncated_tcp"):
+            owned = bytearray(tcp())
+            if malformed == "ipv4_length":
+                owned[17] = 0
+            elif malformed == "invalid_tcp":
+                owned[47] = 3
+            else:
+                owned = owned[:45]
+            self.assertEqual(self.run_packet(owned),1)
+            other = bytearray(owned)
+            other[33] = 2 # Identical malformed packet for an unowned host
+            self.assertEqual(self.run_packet(other),2)
+        # Without a valid fixed IP header there is no reliable destination.
+        self.assertEqual(self.run_packet(tcp()[:20]),2)
 
     def test_observe_and_stale_lease(self):
         for observe,lease in ((1,60),(0,-1)):
@@ -188,6 +214,24 @@ class XDPTests(unittest.TestCase):
                 self.configure(mode=3,observe=observe,lease=lease)
                 self.assertEqual(self.run_packet(tcp(flags=0x02)),2)
                 self.assertEqual(self.run_packet(tcp(flags=0x18)),2)
+
+    def test_malformed_ipv6_only_enforced_for_owned_enabled_destination(self):
+        import ipaddress
+        src = ipaddress.IPv6Address("2001:db8::7").packed
+        owned = ipaddress.IPv6Address("2001:db8::10").packed
+        foreign = ipaddress.IPv6Address("2001:db8::11").packed
+        # Payload length claims more bytes than the frame contains; the fixed
+        # 40-byte IPv6 header still gives us a trustworthy destination key.
+        raw = bytes(12) + b"\x86\xdd" + struct.pack("!IHBB16s16s",
+            6 << 28, 40, 6, 64, src, owned) + tcp()[34:]
+        self.loader("prefix", self.pin, "owned", "add", "2001:db8::10/128", 1)
+        self.assertEqual(self.run_packet(raw), 1)
+        other = bytearray(raw)
+        other[38:54] = foreign
+        self.assertEqual(self.run_packet(other), 2)
+        self.loader("config",self.pin,time.monotonic_ns()+int(60e9),0,0,0,0,0,0,1)
+        self.assertEqual(self.run_packet(raw),2)
+        self.configure()
 
     def test_syn_budget_exempts_ack_and_has_no_dynamic_source_map(self):
         self.configure(rate=1,burst=1)

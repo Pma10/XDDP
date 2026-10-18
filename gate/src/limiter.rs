@@ -129,8 +129,21 @@ impl Limiter {
             (!prefixes.contains_key(&prefix) && prefixes.len() >= self.prefix.capacity) {
             self.metrics.inc(21); return None;
         }
-        let i = ips.entry(ip).or_insert_with(|| { self.metrics.inc(28); self.metrics.inc(32); Entry::new(&self.cfg.ip, now) });
-        let net = prefixes.entry(prefix).or_insert_with(|| { self.metrics.inc(29); self.metrics.inc(33); Entry::new(&self.cfg.prefix, now) });
+        // Evaluate new identities against temporary buckets first. If they
+        // fail global/source budgets, avoid filling the bounded identity maps
+        // with addresses that were never admitted.
+        let new_ip = !ips.contains_key(&ip);
+        let new_prefix = !prefixes.contains_key(&prefix);
+        let mut provisional_ip = new_ip.then(|| Entry::new(&self.cfg.ip, now));
+        let mut provisional_prefix = new_prefix.then(|| Entry::new(&self.cfg.prefix, now));
+        let i = match ips.get_mut(&ip) {
+            Some(existing) => existing,
+            None => provisional_ip.as_mut().expect("new identity"),
+        };
+        let net = match prefixes.get_mut(&prefix) {
+            Some(existing) => existing,
+            None => provisional_prefix.as_mut().expect("new prefix"),
+        };
         i.touched = now; net.touched = now;
         if (self.cfg.connections_ip > 0 && i.active >= self.cfg.connections_ip) ||
            (self.cfg.connections_prefix > 0 && net.active >= self.cfg.connections_prefix) {
@@ -154,7 +167,16 @@ impl Limiter {
             if prefix_ok { net.buckets[0].consume(); }
         }
         if global_ok { global[Event::Connect as usize].consume(); }
+        drop(global);
         i.active += 1; net.active += 1; i.pending += 1; net.pending += 1;
+        if new_ip {
+            ips.insert(ip, provisional_ip.take().expect("provisional IP"));
+            self.metrics.inc(28); self.metrics.inc(32);
+        }
+        if new_prefix {
+            prefixes.insert(prefix, provisional_prefix.take().expect("provisional prefix"));
+            self.metrics.inc(29); self.metrics.inc(33);
+        }
         Some(Ticket { limiter: self.clone(), ip, prefix, handshake: false, admitted: false,
             status_complete: false, server_rejected: false, status: false })
     }
@@ -269,6 +291,37 @@ mod tests {
         t.handshake=true; t.mark_admitted(); drop(t); assert_eq!(m.get(22),0);
         let mut t=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
         t.handshake=true; drop(t); assert_eq!(m.get(22),1);
+    }
+    #[test] fn blocked_global_connect_does_not_fill_identity_tables() {
+        let mut cfg=config();
+        cfg.global.connect=Rate {per_second:0.001,burst:1.0};
+        let m=Arc::new(Metrics::new()); let l=Limiter::new(cfg,m.clone());
+        let p=Policy {mode:0,observe:false,exempt:false};
+        let held=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
+        for n in 1..=100 {
+            let ip=IpAddr::V4(Ipv4Addr::from(0xcb007100u32+n));
+            assert!(l.accept(ip,p).is_none());
+        }
+        assert_eq!(m.get(32),1,"rejected IPs must not retain identity entries");
+        assert_eq!(m.get(33),1,"rejected prefixes must not retain prefix entries");
+        assert_eq!(m.get(21),0,"identity table cannot fill from budget rejects");
+        drop(held);
+    }
+    #[test] fn rejected_source_cannot_spend_shared_connect_tokens() {
+        let mut cfg=config();
+        cfg.connections_ip=1;
+        cfg.global.connect=Rate {per_second:0.001,burst:2.0};
+        let l=Limiter::new(cfg,Arc::new(Metrics::new()));
+        let p=Policy {mode:0,observe:false,exempt:false};
+        let first=l.accept("192.0.2.1".parse().unwrap(),p).unwrap();
+        // These are rejected by the IP concurrency cap before touching
+        // shared global credits. They cannot starve a different source.
+        for _ in 0..20 { assert!(l.accept(first.ip,p).is_none()); }
+        let second=l.accept("192.0.2.2".parse().unwrap(),p);
+        assert!(second.is_some());
+        // The two successful clients legitimately exhausted global credits.
+        assert!(l.accept("192.0.2.3".parse().unwrap(),p).is_none());
+        drop(first); drop(second);
     }
     #[test] fn rejected_ip_cannot_spend_shared_login_tokens() {
         let mut cfg=config();
