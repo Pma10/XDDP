@@ -24,6 +24,49 @@ def tcp(flags=0x10,payload=b"",port=25565):
 
 @unittest.skipUnless(os.environ.get("XDDP_BPF_TEST") == "1","set XDDP_BPF_TEST=1 as root on Linux")
 class XDPTests(unittest.TestCase):
+    def policy(self, text, check=True):
+        return subprocess.run([str(ROOT/'build/xddp-loader'),'policy',str(self.pin)],
+                              input=text,text=True,capture_output=True,check=check)
+
+    def test_bulk_policy_reconciles_ports_prefixes_and_canonical_ipv6(self):
+        self.configure(lease=0)
+        self.policy('port 25565 1\nowned 192.0.2.1/32 1\nblock 198.51.100.7/32 11\n'
+                    'allow 2001:db8::1234/64 1\n')
+        self.configure()
+        path=Path(self.tmp.name)/'bulk.packet'; path.write_bytes(tcp())
+        self.assertEqual(json.loads(self.loader('test',self.pin,path))['retval'],1)
+        self.configure(lease=0)
+        self.policy('port 25565 1\nowned 192.0.2.1/32 1\n')
+        self.configure()
+        self.assertEqual(json.loads(self.loader('test',self.pin,path))['retval'],2)
+
+    def test_invalid_bulk_policy_leaves_existing_maps_untouched(self):
+        self.loader('prefix',self.pin,'block','add','198.51.100.7/32',11)
+        for text in ('port 25565 1\nblock invalid/32 11\n',
+                     'port 25565 1\nport 25565 2\n',
+                     'owned 192.0.2.1/24 1\nowned 192.0.2.9/24 1\n',
+                     'unknown 192.0.2.1/32 1\n',
+                     'port 25565 1 extra\n', 'port 25565 1'):
+            with self.subTest(text=text):
+                self.assertNotEqual(self.policy(text,check=False).returncode,0)
+                path=Path(self.tmp.name)/'invalid-bulk.packet'; path.write_bytes(tcp())
+                self.assertEqual(json.loads(self.loader('test',self.pin,path))['retval'],1)
+
+    def test_bulk_policy_refuses_live_lease_before_mutation(self):
+        self.assertNotEqual(self.policy('port 25565 2\n',check=False).returncode,0)
+        path=Path(self.tmp.name)/'live-lease.packet'; path.write_bytes(tcp())
+        self.assertEqual(json.loads(self.loader('test',self.pin,path))['retval'],2)
+
+    def test_bulk_policy_full_prefix_capacity_and_overflow_rejection(self):
+        rows=''.join(f'block 198.51.{96+i//256}.{i%256}/32 11\n' for i in range(4096))
+        self.configure(lease=0)
+        self.policy('port 25565 1\nowned 192.0.2.1/32 1\n'+rows)
+        self.configure()
+        path=Path(self.tmp.name)/'capacity.packet'; path.write_bytes(tcp())
+        self.assertEqual(json.loads(self.loader('test',self.pin,path))['retval'],1)
+        self.assertNotEqual(self.policy(rows+'block 203.0.113.1/32 11\n',check=False).returncode,0)
+        self.assertEqual(json.loads(self.loader('test',self.pin,path))['retval'],1)
+
     @classmethod
     def setUpClass(cls):
         cls.pin = Path("/sys/fs/bpf")/("xddp-test-"+uuid.uuid4().hex)
@@ -50,7 +93,8 @@ class XDPTests(unittest.TestCase):
         self.loader("clear",self.pin,"block")
 
     def configure(self,observe=0,lease=60,fragments=0,rate=0,burst=0,mode=0):
-        self.loader("config",self.pin,time.monotonic_ns()+int(lease*1e9),observe,mode,1,fragments,rate,burst,2)
+        deadline = time.monotonic_ns()+int(lease*1e9) if lease else 0
+        self.loader("config",self.pin,deadline,observe,mode,1,fragments,rate,burst,2)
 
     @contextmanager
     def foreign_counters(self,value_size=176,map_type=6,key_size=4,entries=1):

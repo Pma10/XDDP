@@ -3,6 +3,7 @@
 import argparse
 import copy
 import fcntl
+import http.client
 import ipaddress
 import json
 import sqlite3
@@ -53,10 +54,14 @@ class Controller:
         self.generation = time.time_ns()
         self.history = History(cfg.get("history_file", DEFAULT_PATH), cfg.get("history_retention_days", 30))
         self.history_errors = 0
+        self.telemetry_errors = 0
+        self.metrics_errors = 0
 
-    def loader(self, *args):
+    def loader(self, *args, input=None):
+        # Telemetry must not consume the safety lease's whole lifetime.
+        timeout = min(0.5, self.cfg["lease_seconds"] / 6) if args[0] in ("stats", "status") else 8
         p = subprocess.run([self.cfg["loader"], *map(str, args)], capture_output=True,
-                           text=True, timeout=8, check=True)
+                           input=input, text=True, timeout=timeout, check=True)
         return json.loads(p.stdout) if p.stdout.strip().startswith("{") else p.stdout.strip()
 
     def lease(self, seconds=None):
@@ -74,20 +79,25 @@ class Controller:
             pin.mkdir(parents=True, exist_ok=True)
             self.loader("load", self.cfg["object"], pin)
         self.loader("validate",pin)
-        # Static policy reconciliation is fail-open and single-writer.
-        self.lease(0)
-        for name in ("ports", "owned", "allow", "block"):
-            self.loader("clear", pin, name)
+        # Validate the entire bounded policy before entering reconciliation.
         policies = {}
         for key, flag in (("protected_tcp_ports",1),("drop_tcp_ports",2),("drop_udp_ports",4)):
             for port in self.cfg[key]:
                 policies[port] = policies.get(port,0) | flag
-        for port, flags in policies.items():
-            self.loader("port", pin, port, flags)
-        for key, mapname, reason in (("owned_prefixes","owned",1),("allow_prefixes","allow",1),
-                                     ("bogon_prefixes","block",5),("block_prefixes","block",11)):
-            for prefix in self.cfg[key]:
-                self.loader("prefix",pin,mapname,"add",prefix,reason)
+        lines = [f"port {port} {flags}" for port, flags in sorted(policies.items())]
+        blocks = {prefix: 5 for prefix in self.cfg["bogon_prefixes"]}
+        blocks.update({prefix: 11 for prefix in self.cfg["block_prefixes"]})
+        for mapname, prefixes in (("owned", dict.fromkeys(self.cfg["owned_prefixes"], 1)),
+                                  ("allow", dict.fromkeys(self.cfg["allow_prefixes"], 1)),
+                                  ("block", blocks)):
+            lines.extend(f"{mapname} {prefix} {reason}" for prefix, reason in sorted(prefixes.items()))
+        policy = "\n".join(lines) + "\n"
+        if len(policy.encode("ascii")) > 4 * 1024 * 1024:
+            raise ValueError("loader policy exceeds 4 MiB")
+        # One subprocess replaces thousands of fork/exec calls. Lease expiry
+        # still deliberately covers this non-transactional map reconciliation.
+        self.lease(0)
+        self.loader("policy", pin, input=policy)
 
     def gate_counters(self):
         # Proxy environment variables must never send localhost telemetry elsewhere.
@@ -105,10 +115,21 @@ class Controller:
 
     def tick(self):
         now = time.monotonic()
-        current = self.loader("stats",self.cfg["pin_dir"])
+        try:
+            current = self.loader("stats",self.cfg["pin_dir"])
+            if not isinstance(current, dict) or not isinstance(current.get("candidate_reasons"), dict):
+                raise ValueError("invalid XDP statistics")
+            xdp_available = True
+        except (OSError, ValueError, subprocess.SubprocessError):
+            # A missing sample is not zero traffic. Drop its rate baseline so
+            # a later successful sample cannot masquerade as a one-tick spike.
+            current = {}
+            xdp_available = False
+            self.telemetry_errors += 1
         current.update(host_pressure())
         current.update(host_network_counters())
         self.snapshot = copy.deepcopy(current)
+        self.snapshot["stats_available"] = xdp_available
         # Status is a read-only netlink query. Unknown attachment is not zero
         # traffic, and failure here must not prevent normal lease publication.
         try:
@@ -130,8 +151,9 @@ class Controller:
             self.snapshot["gate_runtime_generation"] = current.get("runtime_generation",0)
             self.snapshot["gate_runtime_rejected_reads"] = current.get("runtime_rejected_reads",0)
             self.snapshot["gate_runtime_missing_reads"] = current.get("runtime_missing_reads",0)
-        except (OSError, ValueError, UnicodeError):
+        except (OSError, ValueError, http.client.HTTPException):
             self.snapshot["gate_metrics_available"] = False
+            self.telemetry_errors += 1
         self.signals = rates(self.previous,current,now-self.previous_time)
         self.previous, self.previous_time = current, now
         mode = self.adaptive.sample(self.signals,now)
@@ -150,16 +172,25 @@ class Controller:
         for key, value in self.snapshot.items():
             if type(value) in (int,float):
                 text.append(f"xddp_xdp_{key} {value}")
-        for reason, count in self.snapshot["candidate_reasons"].items():
+        for reason, count in self.snapshot.get("candidate_reasons", {}).items():
             text.append(f'xddp_xdp_candidate_drop{{reason="{reason}"}} {count}')
         for name,value in self.signals.items():
             text.append(f"xddp_observed_{name} {value}")
         text.extend([f"xddp_controller_history_write_errors {self.history_errors}",
+                     f"xddp_controller_xdp_stats_available {int(xdp_available)}",
+                     f"xddp_controller_telemetry_errors {self.telemetry_errors}",
+                     f"xddp_controller_metrics_write_errors {self.metrics_errors}",
+                     f"xddp_controller_emergency_timeouts {self.adaptive.emergency_timeouts}",
                      f"xddp_controller_mode {self.mode}",
                      f"xddp_controller_recovery_stage {self.adaptive.recovery_stage() if self.cfg['manual_mode'] == 'auto' else 0}",
                      f"xddp_controller_observe {int(self.cfg['observe'])}",
                      f"xddp_controller_last_update_unix {int(time.time())}"])
-        atomic(self.cfg["metrics_file"],"\n".join(text)+"\n")
+        try:
+            atomic(self.cfg["metrics_file"],"\n".join(text)+"\n")
+        except OSError as exc:
+            self.metrics_errors += 1
+            if self.metrics_errors <= 3:
+                print(f"XDDP metrics write failed: {exc}", file=sys.stderr)
 
     def publish(self, expired=False):
         self.generation += 1
@@ -173,6 +204,10 @@ class Controller:
                         configured_syn_per_cpu=(self.adaptive.syn_budget(self.cfg["syn_per_cpu"])
                             if self.cfg["manual_mode"] == "auto" else self.cfg["syn_per_cpu"][MODES[self.mode]]),
                         recovery_stage=(self.adaptive.recovery_stage() if self.cfg["manual_mode"] == "auto" else 0),
+                        emergency_timeouts=self.adaptive.emergency_timeouts,
+                        telemetry_errors=self.telemetry_errors,
+                        metrics_write_errors=self.metrics_errors,
+                        xdp_stats_available=self.snapshot.get("stats_available", False),
                         configured_owned_prefixes=len(self.cfg["owned_prefixes"]),
                         configured_protected_tcp_ports=self.cfg["protected_tcp_ports"],
                         gate_metrics_available=self.snapshot.get("gate_metrics_available",False),

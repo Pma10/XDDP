@@ -59,7 +59,11 @@ Escalation requires
 consecutive samples and cooldown. De-escalation requires every signal configured
 for the current mode to be present and below `exit`, consecutive samples and
 cooldown, then decreases one mode. Missing telemetry cannot itself escalate or
-justify recovery. Empty bands never trigger a mode. Samples reset after counter
+justify ordinary recovery. Automatic EMERGENCY is additionally bounded by
+`emergency_max_seconds` (default 120), followed by ATTACK with
+`emergency_rearm_seconds` (default 60) before a fresh guarded freeze can occur.
+See PRESSURE_POLICY.md for probe behavior during telemetry loss.
+Empty bands never trigger a mode. Samples reset after counter
 restart; negative deltas are discarded.
 
 Additional pressure signals are `active_status`, `backend_connections`,

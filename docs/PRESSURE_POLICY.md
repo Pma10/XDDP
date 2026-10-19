@@ -151,6 +151,28 @@ when the rate changes, so the budgets are *not* global connection caps.
 Controller restarts reset the in-memory probe stage to NORMAL under the
 existing fail-open lease contract.
 
+Automatic EMERGENCY has a hard deadline: `adaptive.emergency_max_seconds`
+defaults to **120 seconds**, after which the controller returns to ATTACK even
+if recovery telemetry is absent or the attack persists. With recovery enabled,
+it starts at the smallest probe budget; otherwise it uses the ATTACK budget.
+`adaptive.emergency_rearm_seconds` defaults to **60 seconds** and prevents an
+immediate full freeze after that timeout. Both settings accept integers 1..3600.
+After rearming, fresh guarded signals and the usual consecutive samples are
+required again. Missing telemetry still cannot justify increasing a probe rate.
+This bounds a complete admission outage; it trades some protection for a chance
+to reconnect during persistent attacks. Manual `mode emergency` is explicitly
+operator-controlled and is not subject to the automatic deadline.
+
+Statistics/status subprocesses time out after 0.5 seconds. Missing XDP/Gate
+telemetry is exposed as unavailable, without inventing zero traffic or keeping
+an obsolete counter baseline. The policy and kernel lease are still renewed;
+host pressure can still escalate independently. History and Prometheus output
+failures do not terminate the controller. Runtime policy publication and kernel
+lease failures remain fatal and retain the existing fail-open cleanup contract.
+`ddosctl status` exposes `telemetry_errors`, `metrics_write_errors`,
+`xdp_stats_available`, and `emergency_timeouts`; corresponding controller metrics
+make these failures visible when the metrics filesystem is writable again.
+
 **The feature is disabled by default**. The pressure example keeps
 `allow_emergency=false`, `recovery.enabled=false`, and no owned prefixes.
 A controller code/config upgrade uses a controlled controller restart but

@@ -1,4 +1,5 @@
 import copy
+import http.client
 import json
 from pathlib import Path
 import subprocess
@@ -13,6 +14,73 @@ sys.path.insert(0,str(ROOT/"controller"))
 
 @unittest.skipUnless(sys.platform.startswith("linux"),"Linux controller uses fcntl/AF_UNIX")
 class ControllerIOTests(unittest.TestCase):
+    def test_prepare_sends_one_bulk_policy_and_manual_blocks_override_bogons(self):
+        pin=Path(self.tmp.name)/'pins'; pin.mkdir(); (pin/'program').touch()
+        self.controller.cfg.update(pin_dir=str(pin),
+            allow_prefixes=[f'198.51.{i//256}.{i%256}/32' for i in range(1000)],
+            bogon_prefixes=['192.0.2.0/24'], block_prefixes=['192.0.2.0/24'])
+        with patch.object(self.controller, 'loader', return_value={}) as loader:
+            self.controller.prepare()
+        self.assertEqual([c.args[0] for c in loader.call_args_list], ['validate','config','policy'])
+        policy=loader.call_args.kwargs['input']
+        self.assertEqual(policy.count('allow '), 1000)
+        self.assertIn('block 192.0.2.0/24 11\n',policy)
+        self.assertNotIn('block 192.0.2.0/24 5\n',policy)
+        self.assertIn('port 25565 1\n',policy)
+
+    def test_stats_failure_preserves_attack_lease_and_recovers_without_rate_spike(self):
+        from core import Adaptive
+        cfg=json.loads((ROOT/'config/controller-pressure.observe.json').read_text())
+        self.controller.adaptive=Adaptive(cfg['adaptive'],0)
+        self.controller.adaptive.mode=self.controller.mode=2
+        self.controller.cfg['manual_mode']='auto'
+        self.controller.previous={'syn_packets':100}
+        samples=iter([subprocess.TimeoutExpired('stats',0.5),
+                      {'syn_packets':100000,'candidate_reasons':{}},
+                      {'syn_packets':100002,'candidate_reasons':{}}])
+        def loader(*args):
+            self.calls.append(args)
+            if args[0]=='stats':
+                result=next(samples)
+                if isinstance(result,Exception): raise result
+                return result
+            if args[0]=='status': return {'program_id':42}
+            return {}
+        self.controller.loader=loader
+        with patch('ddosctl.host_pressure',return_value={}), \
+             patch('ddosctl.host_network_counters',return_value={}), \
+             patch.object(self.controller,'gate_counters',side_effect=http.client.IncompleteRead(b'')), \
+             patch('ddosctl.time.monotonic',side_effect=[10.,11.,12.]):
+            self.controller.tick()
+            self.assertEqual(self.controller.mode,2)
+            self.assertFalse(self.controller.command(['status'])['xdp_stats_available'])
+            self.assertNotIn('syn_per_second',self.controller.signals)
+            self.controller.tick()
+            self.assertNotIn('syn_per_second',self.controller.signals)
+            self.controller.tick()
+        self.assertEqual(self.controller.signals['syn_per_second'],2)
+        self.assertEqual(self.controller.telemetry_errors,4)
+        self.assertEqual(len([c for c in self.calls if c[0]=='config']),3)
+        self.assertFalse(self.controller.stopping)
+
+    def test_metrics_write_error_isolated_but_runtime_write_is_fatal(self):
+        from ddosctl import atomic
+        def loader(*args):
+            self.calls.append(args)
+            return {'candidate_reasons':{}} if args[0]=='stats' else {}
+        self.controller.loader=loader
+        def write(path,*args):
+            if path==self.controller.cfg['metrics_file']: raise OSError('disk full')
+            return atomic(path,*args)
+        with patch('ddosctl.atomic',side_effect=write), \
+             patch.object(self.controller,'gate_counters',return_value={}), patch('ddosctl.sys.stderr'):
+            self.controller.tick()
+        self.assertEqual(self.controller.metrics_errors,1)
+        self.assertEqual(self.calls[-1][0],'config')
+        with patch.object(self.controller,'publish',side_effect=OSError('runtime unavailable')), \
+             patch.object(self.controller,'gate_counters',return_value={}):
+            with self.assertRaises(OSError): self.controller.tick()
+
     def setUp(self):
         from ddosctl import Controller
         self.tmp=tempfile.TemporaryDirectory()

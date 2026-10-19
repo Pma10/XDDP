@@ -167,8 +167,12 @@ def validate(cfg):
             raise ValueError("SYN rate and burst must both be zero or positive")
     a = cfg["adaptive"]
     required = {"up_samples", "down_samples", "cooldown_seconds", "thresholds"}
-    if not required <= set(a) or set(a) - required - {"required_signals", "immediate_signals", "allow_emergency", "up_cooldown_seconds", "recovery"}:
+    if not required <= set(a) or set(a) - required - {"required_signals", "immediate_signals", "allow_emergency", "up_cooldown_seconds", "recovery", "emergency_max_seconds", "emergency_rearm_seconds"}:
         raise ValueError("invalid adaptive keys")
+    for name, default in (("emergency_max_seconds", 120), ("emergency_rearm_seconds", 60)):
+        value = a.get(name, default)
+        if type(value) is not int or not 1 <= value <= 3600:
+            raise ValueError(f"{name} must be an integer in 1..3600")
     if "up_cooldown_seconds" in a:
         positive(a["up_cooldown_seconds"], "up_cooldown_seconds", 0, 3600)
         if type(a["up_cooldown_seconds"]) is not int:
@@ -264,6 +268,8 @@ class Adaptive:
         self.target = 0
         self.recovery_index = -1
         self.recovery_since = now
+        self.emergency_blocked_until = now
+        self.emergency_timeouts = 0
 
     def recovery_stage(self):
         return self.recovery_index + 1  # 0 means inactive
@@ -282,10 +288,21 @@ class Adaptive:
                                    for name, band in bands.items())
 
     def sample(self, signals, now):
+        # Automatic full admission freezes are bounded even if telemetry disappears.
+        # Keep ATTACK protection and rate-limited probes, never jump to observation.
+        if self.mode == 3 and now - self.changed >= self.cfg.get("emergency_max_seconds", 120):
+            self.mode, self.changed = 2, now
+            self.up = self.down = self.target = 0
+            self.emergency_blocked_until = now + self.cfg.get("emergency_rearm_seconds", 60)
+            self.emergency_timeouts += 1
+            self.recovery_index = 0 if self.cfg.get("recovery", {}).get("enabled", False) else -1
+            self.recovery_since = now
+            return self.mode
         target = 0
         immediate_target = 0
         for i, mode in enumerate(MODES[1:], 1):
-            if mode == "emergency" and not self.cfg.get("allow_emergency", False):
+            if mode == "emergency" and (not self.cfg.get("allow_emergency", False)
+                                         or now < self.emergency_blocked_until):
                 continue
             bands = self.cfg["thresholds"][mode]
             high = {n for n, b in bands.items() if n in signals and math.isfinite(signals[n]) and signals[n] >= b["enter"]}

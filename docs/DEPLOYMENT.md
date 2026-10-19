@@ -52,6 +52,13 @@ or attach XDP.
 
 ## Configure an observation-only XDP deployment
 
+Controller and loader must be upgraded together: startup now sends a bounded
+stdin `policy` document to one loader process rather than spawning a process
+for every prefix/port. The loader validates the full document and pinned map
+ownership before mutation. Reconciliation deliberately expires the lease and
+is still non-transactional; batching shortens that interval but does not remove
+the fail-open window. It uses the existing XDP ABI v2 and needs no Gate restart.
+
 1. Inventory `ip -br addr show dev eth0`, `ss -lntup`, nftables rules, routing,
    Docker port publishing and required UDP services. Do not infer unused ports
    from a historical listener snapshot. Determine whether service packets at XDP

@@ -26,7 +26,7 @@ static uint64_t number(const char *s, uint64_t max) {
     char *end;
     errno = 0;
     unsigned long long n = strtoull(s, &end, 10);
-    require(*s && *s != '-' && !errno && !*end && n <= max, "invalid number");
+    require(*s >= '0' && *s <= '9' && !errno && !*end && n <= max, "invalid number");
     return n;
 }
 struct map_schema {
@@ -156,12 +156,10 @@ static void detach(char **v) {
     if (bpf_xdp_detach(index, f, &opts)) die("detach");
     close(old_fd);
 }
-static void prefix(char **v) {
-    require(!strcmp(v[3], "owned") || !strcmp(v[3], "allow") || !strcmp(v[3], "block"), "invalid prefix map");
-    int fd = pinned(v[2], v[3]);
+static struct prefix_key prefix_key(const char *cidr) {
     char text[128];
-    require(strlen(v[5]) < sizeof(text), "CIDR too long");
-    strcpy(text, v[5]);
+    require(strlen(cidr) < sizeof(text), "CIDR too long");
+    strcpy(text, cidr);
     char *slash = strchr(text, '/');
     struct prefix_key k = {};
     k.family = strchr(text, ':') ? 6 : 4;
@@ -171,6 +169,12 @@ static void prefix(char **v) {
     k.prefixlen = 32 + bits;
     for (unsigned i = bits; i < (k.family == 4 ? 32U : 128U); i++)
         k.addr[i / 8] &= ~(1U << (7 - i % 8));
+    return k;
+}
+static void prefix(char **v) {
+    require(!strcmp(v[3], "owned") || !strcmp(v[3], "allow") || !strcmp(v[3], "block"), "invalid prefix map");
+    int fd = pinned(v[2], v[3]);
+    struct prefix_key k = prefix_key(v[5]);
     if (!strcmp(v[4], "add")) {
         __u32 val = number(v[6], R_COUNT - 1);
         if (bpf_map_update_elem(fd, &k, &val, BPF_ANY)) die("prefix update");
@@ -203,6 +207,66 @@ static void clear_map(const char *dir, const char *name) {
         }
     }
     close(fd);
+}
+/* Parse and validate all stdin before touching maps. A caller must expire the
+ * lease for this bounded, single-writer reconciliation; it is not atomic. */
+static void policy(const char *dir) {
+    struct entry { struct prefix_key key; __u32 value; };
+    const char *names[] = {"ports", "owned", "allow", "block"};
+    struct entry *entries = calloc(3 * PREFIX_CAP, sizeof(*entries));
+    __u32 *ports = calloc(65536, sizeof(*ports));
+    if (!entries || !ports) die("policy allocation");
+    unsigned counts[3] = {};
+    char line[160];
+    size_t total = 0;
+    while (fgets(line, sizeof(line), stdin)) {
+        size_t length = strlen(line);
+        total += length;
+        require(total <= 4 * 1024 * 1024 && length && line[length-1] == '\n', "policy line/input too large or unterminated");
+        if (length == 1) continue;
+        char name[16], key[128], value[32], extra[2];
+        require(sscanf(line, "%15s %127s %31s %1s", name, key, value, extra) == 3, "invalid policy row");
+        if (!strcmp(name, "port")) {
+            __u32 port = number(key, 65535), flags = number(value, 7);
+            require(port && flags && (flags & 3) != 3 && !ports[port], "invalid/conflicting/duplicate port policy");
+            ports[port] = flags;
+        } else {
+            int index = !strcmp(name,"owned") ? 0 : !strcmp(name,"allow") ? 1 : !strcmp(name,"block") ? 2 : -1;
+            require(index >= 0, "invalid policy map");
+            require(counts[index] < PREFIX_CAP, "prefix policy exceeds capacity");
+            struct prefix_key k = prefix_key(key);
+            __u32 reason = number(value, R_COUNT - 1);
+            for (unsigned i = 0; i < counts[index]; i++)
+                require(memcmp(&entries[index * PREFIX_CAP + i].key, &k, sizeof(k)) != 0, "duplicate prefix policy");
+            entries[index * PREFIX_CAP + counts[index]++] = (struct entry){k, reason};
+        }
+    }
+    require(!ferror(stdin), "policy input read failed");
+    validate_generation(dir);
+    int config_fd = pinned(dir, "configuration");
+    __u32 config_key = 0;
+    struct config config;
+    if (bpf_map_lookup_elem(config_fd, &config_key, &config)) die("policy lease read");
+    close(config_fd);
+    require(config.lease_ns == 0, "expire lease before policy reconciliation");
+    int fds[4];
+    for (int i = 0; i < 4; i++) fds[i] = pinned(dir, names[i]);
+    /* Elide unchanged ARRAY writes and reconcile LPMs in this process. */
+    for (__u32 k = 0; k < 65536; k++) {
+        __u32 previous;
+        if (bpf_map_lookup_elem(fds[0], &k, &previous)) die("policy port read");
+        if (previous != ports[k] && bpf_map_update_elem(fds[0], &k, &ports[k], BPF_ANY)) die("policy port write");
+    }
+    for (int i = 0; i < 3; i++) {
+        clear_map(dir, names[i+1]);
+        for (unsigned j = 0; j < counts[i]; j++) {
+            struct entry *entry = &entries[i * PREFIX_CAP + j];
+            if (bpf_map_update_elem(fds[i+1], &entry->key, &entry->value, BPF_ANY)) die("policy prefix write");
+        }
+    }
+    for (int i = 0; i < 4; i++) close(fds[i]);
+    free(entries);
+    free(ports);
 }
 static void stats(const char *dir) {
     int fd = pinned(dir, "counters"), n = libbpf_num_possible_cpus();
@@ -267,6 +331,7 @@ int main(int argc, char **v) {
         close(fd);
     } else if (!strcmp(v[1], "prefix") && argc == 7) prefix(v);
     else if (!strcmp(v[1], "clear") && argc == 4) clear_map(v[2],v[3]);
+    else if (!strcmp(v[1], "policy") && argc == 3) policy(v[2]);
     else if (!strcmp(v[1], "test") && argc == 4) test_run(v[2],v[3]);
     else if (!strcmp(v[1], "id") && argc == 3) {
         int fd = pinned(v[2],"program");

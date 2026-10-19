@@ -39,6 +39,49 @@ LOW = {"syn_per_second": 1, "conntrack_percent": 1,
        "listen_overflows_per_second": 0}
 
 class RecoveryProbeTests(unittest.TestCase):
+    def test_freeze_timeout_probes_with_missing_telemetry_and_rearms_after_wait(self):
+        cfg = profile()
+        cfg['adaptive'].update(emergency_max_seconds=10, emergency_rearm_seconds=5)
+        validate(cfg)
+        a = Adaptive(cfg['adaptive'], 0)
+        a.sample(HIGH, 1)
+        self.assertEqual(a.sample(HIGH, 2), 3)
+        self.assertEqual(a.sample({}, 11), 3)
+        self.assertEqual(a.sample({}, 12), 2)
+        self.assertEqual(a.emergency_timeouts, 1)
+        self.assertEqual(a.recovery_stage(), 1)
+        self.assertEqual(a.syn_budget(cfg['syn_per_cpu']), {'rate': 8, 'burst': 16})
+        for t in range(13, 17):
+            self.assertEqual(a.sample(HIGH, t), 2)
+        self.assertEqual(a.sample({}, 17), 2)
+        self.assertEqual(a.sample(HIGH, 18), 2)
+        self.assertEqual(a.sample(HIGH, 19), 3)
+
+    def test_persistent_attack_cannot_extend_full_freeze_deadline(self):
+        cfg = profile()
+        cfg['adaptive'].update(emergency_max_seconds=10)
+        a = Adaptive(cfg['adaptive'], 0)
+        a.sample(HIGH, 1)
+        a.sample(HIGH, 2)
+        for t in range(3, 12):
+            self.assertEqual(a.sample(HIGH, t), 3)
+        self.assertEqual(a.sample(HIGH, 12), 2)
+        self.assertEqual(a.recovery_stage(), 1)
+
+    def test_emergency_duration_defaults_and_validation(self):
+        cfg = profile()
+        for key in ('emergency_max_seconds', 'emergency_rearm_seconds'):
+            for value in (0, -1, True, 1.5, 3601, '120'):
+                invalid = copy.deepcopy(cfg)
+                invalid['adaptive'][key] = value
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                    validate(invalid)
+        a = Adaptive(cfg['adaptive'], 0)
+        a.sample(HIGH, 1)
+        a.sample(HIGH, 2)
+        self.assertEqual(a.sample({}, 121), 3)
+        self.assertEqual(a.sample({}, 122), 2)
+
     def test_freeze_probe_ramp_and_normal_recovery(self):
         cfg = profile()
         a = Adaptive(cfg["adaptive"], 0)
