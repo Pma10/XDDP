@@ -14,6 +14,27 @@ sys.path.insert(0,str(ROOT/"controller"))
 
 @unittest.skipUnless(sys.platform.startswith("linux"),"Linux controller uses fcntl/AF_UNIX")
 class ControllerIOTests(unittest.TestCase):
+    def test_tick_renews_both_policies_before_optional_writes(self):
+        events = []
+        with patch.object(self.controller, 'loader', return_value={'candidate_reasons': {}}), \
+             patch.object(self.controller, 'gate_counters', return_value={}), \
+             patch.object(self.controller, 'publish', side_effect=lambda: events.append('publish')), \
+             patch.object(self.controller, 'lease', side_effect=lambda: events.append('lease')), \
+             patch.object(self.controller.history, 'record', side_effect=lambda *a: events.append('history')), \
+             patch('ddosctl.atomic', side_effect=lambda *a: events.append('metrics')):
+            self.controller.tick()
+        self.assertEqual(events, ['publish', 'lease', 'history', 'metrics'])
+
+    def test_failed_lease_prevents_optional_writes(self):
+        with patch.object(self.controller, 'loader', return_value={'candidate_reasons': {}}), \
+             patch.object(self.controller, 'gate_counters', return_value={}), \
+             patch.object(self.controller, 'lease', side_effect=OSError('map unavailable')), \
+             patch.object(self.controller.history, 'record') as record:
+            with self.assertRaises(OSError):
+                self.controller.tick()
+        record.assert_not_called()
+        self.assertFalse(Path(self.controller.cfg['metrics_file']).exists())
+
     def test_prepare_sends_one_bulk_policy_and_manual_blocks_override_bogons(self):
         pin=Path(self.tmp.name)/'pins'; pin.mkdir(); (pin/'program').touch()
         self.controller.cfg.update(pin_dir=str(pin),

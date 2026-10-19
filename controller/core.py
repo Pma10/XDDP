@@ -6,6 +6,7 @@ import urllib.parse
 from pathlib import Path
 
 MODES = ("normal", "elevated", "attack", "emergency")
+NORMAL, ELEVATED, ATTACK, EMERGENCY = range(len(MODES))
 MAX_DOCUMENT_BYTES = 262144
 
 
@@ -262,7 +263,7 @@ def validate(cfg):
 class Adaptive:
     def __init__(self, cfg, now):
         self.cfg = cfg
-        self.mode = 0
+        self.mode = NORMAL
         self.changed = now
         self.up = self.down = 0
         self.target = 0
@@ -275,31 +276,41 @@ class Adaptive:
         return self.recovery_index + 1  # 0 means inactive
 
     def syn_budget(self, budgets):
-        if self.mode == 2 and self.recovery_index >= 0:
+        if self.mode == ATTACK and self.recovery_index >= 0:
             stage = self.cfg["recovery"]["stages"][self.recovery_index]
             return {"rate": stage["rate"], "burst": stage["burst"]}
         return budgets[MODES[self.mode]]
 
-    def _recovery_healthy(self, signals):
-        # Missing or non-finite telemetry cannot justify wider admissions.
-        bands = self.cfg["thresholds"]["attack"]
+    def _below_exit(self, mode, signals):
+        # Missing or non-finite telemetry cannot justify ordinary recovery.
+        bands = self.cfg["thresholds"].get(MODES[mode], {})
         return bool(bands) and all(name in signals and math.isfinite(signals[name])
                                    and signals[name] <= band["exit"]
                                    for name, band in bands.items())
 
-    def sample(self, signals, now):
-        # Automatic full admission freezes are bounded even if telemetry disappears.
-        # Keep ATTACK protection and rate-limited probes, never jump to observation.
-        if self.mode == 3 and now - self.changed >= self.cfg.get("emergency_max_seconds", 120):
-            self.mode, self.changed = 2, now
-            self.up = self.down = self.target = 0
-            self.emergency_blocked_until = now + self.cfg.get("emergency_rearm_seconds", 60)
-            self.emergency_timeouts += 1
-            self.recovery_index = 0 if self.cfg.get("recovery", {}).get("enabled", False) else -1
+    def _start_recovery(self, now):
+        self.recovery_index = 0
+        self.recovery_since = now
+
+    def _transition(self, mode, now):
+        self.mode = mode
+        self.changed = now
+        if mode == EMERGENCY:
+            self.recovery_index = -1
+
+    def _expire_emergency(self, now):
+        self._transition(ATTACK, now)
+        self.up = self.down = self.target = 0
+        self.emergency_blocked_until = now + self.cfg.get("emergency_rearm_seconds", 60)
+        self.emergency_timeouts += 1
+        if self.cfg.get("recovery", {}).get("enabled", False):
+            self._start_recovery(now)
+        else:
+            self.recovery_index = -1
             self.recovery_since = now
-            return self.mode
-        target = 0
-        immediate_target = 0
+
+    def _targets(self, signals, now):
+        target = immediate_target = NORMAL
         for i, mode in enumerate(MODES[1:], 1):
             if mode == "emergency" and (not self.cfg.get("allow_emergency", False)
                                          or now < self.emergency_blocked_until):
@@ -311,55 +322,59 @@ class Adaptive:
                 target = i
                 if any(n in high for n in self.cfg.get("immediate_signals", {}).get(mode, [])):
                     immediate_target = i
-        if immediate_target > self.mode:
-            # Explicit kernel-failure signals can bypass entry debounce/cooldown.
-            # Required guards and emergency opt-in above still apply.
-            self.mode, self.changed = immediate_target, now
-            if self.mode == 3:
-                self.recovery_index = -1
-            self.up = self.down = self.target = 0
-            return self.mode
-        if self.mode == 2 and self.recovery_index >= 0 and target < 3:
-            # Gradually reopen only after fresh, healthy ATTACK exit signals.
-            # Any missing/overloaded sample resets the trial to minimum rate.
-            if not self._recovery_healthy(signals):
-                self.recovery_index = 0
-                self.recovery_since = now
-            else:
-                stage = self.cfg["recovery"]["stages"][self.recovery_index]
-                if now - self.recovery_since >= stage["seconds"]:
-                    self.recovery_index += 1
-                    self.recovery_since = now
-                    if self.recovery_index == len(self.cfg["recovery"]["stages"]):
-                        self.recovery_index = -1
-            self.up = self.down = 0
-            self.target = target
-            return self.mode
-        if target > self.mode:
-            self.up = self.up + 1 if self.target == target else 1
-            self.target = target
-            self.down = 0
-            # Keep legacy timing unless explicitly configured. Recovery cooldown
-            # must not force a busy host to wait before a stronger response.
-            up_cooldown = self.cfg.get("up_cooldown_seconds", self.cfg["cooldown_seconds"])
-            if self.up >= self.cfg["up_samples"] and now - self.changed >= up_cooldown:
-                self.mode, self.changed, self.up = target, now, 0
-                if self.mode == 3:
-                    self.recovery_index = -1
+        return target, immediate_target
+
+    def _sample_recovery(self, signals, now, target):
+        # Any missing/overloaded sample resets the trial to minimum rate.
+        if not self._below_exit(ATTACK, signals):
+            self._start_recovery(now)
         else:
+            stage = self.cfg["recovery"]["stages"][self.recovery_index]
+            if now - self.recovery_since >= stage["seconds"]:
+                self.recovery_index += 1
+                self.recovery_since = now
+                if self.recovery_index == len(self.cfg["recovery"]["stages"]):
+                    self.recovery_index = -1
+        self.up = self.down = 0
+        self.target = target
+
+    def _escalate(self, target, now):
+        self.up = self.up + 1 if self.target == target else 1
+        self.target = target
+        self.down = 0
+        # Recovery cooldown must not delay an independently configured escalation.
+        cooldown = self.cfg.get("up_cooldown_seconds", self.cfg["cooldown_seconds"])
+        if self.up >= self.cfg["up_samples"] and now - self.changed >= cooldown:
+            self._transition(target, now)
             self.up = 0
-            bands = self.cfg["thresholds"].get(MODES[self.mode], {})
-            # All configured signals must be present and below exit; missing data holds.
-            cool = bool(bands) and all(n in signals and math.isfinite(signals[n]) and signals[n] <= b["exit"] for n, b in bands.items())
-            self.down = self.down + 1 if cool else 0
-            if self.mode and self.down >= self.cfg["down_samples"] and now - self.changed >= self.cfg["cooldown_seconds"]:
-                previous_mode = self.mode
-                self.mode -= 1
-                self.changed, self.down = now, 0
-                if (previous_mode == 3 and self.mode == 2
-                        and self.cfg.get("recovery", {}).get("enabled", False)):
-                    self.recovery_index = 0
-                    self.recovery_since = now
+
+    def _relax(self, signals, now):
+        self.up = 0
+        self.down = self.down + 1 if self._below_exit(self.mode, signals) else 0
+        if self.mode and self.down >= self.cfg["down_samples"] and now - self.changed >= self.cfg["cooldown_seconds"]:
+            previous_mode = self.mode
+            self._transition(self.mode - 1, now)
+            self.down = 0
+            if previous_mode == EMERGENCY and self.cfg.get("recovery", {}).get("enabled", False):
+                self._start_recovery(now)
+
+    def sample(self, signals, now):
+        # A full freeze has a deadline even without telemetry. Keep ATTACK protection.
+        if self.mode == EMERGENCY and now - self.changed >= self.cfg.get("emergency_max_seconds", 120):
+            self._expire_emergency(now)
+            return self.mode
+
+        target, immediate_target = self._targets(signals, now)
+        if immediate_target > self.mode:
+            # Required guards still apply to immediate kernel-failure escalation.
+            self._transition(immediate_target, now)
+            self.up = self.down = self.target = 0
+        elif self.mode == ATTACK and self.recovery_index >= 0 and target < EMERGENCY:
+            self._sample_recovery(signals, now, target)
+        elif target > self.mode:
+            self._escalate(target, now)
+        else:
+            self._relax(signals, now)
         return self.mode
 
 

@@ -27,7 +27,7 @@ install -d -m 0755 "$dest/usr/local/lib/xddp/controller" "$dest/usr/local/libexe
 install -m 0755 build/xddp-loader "$dest/usr/local/libexec/xddp-loader"
 install -m 0644 build/xdp_ddos.bpf.o build/xdp_pass.bpf.o "$dest/usr/local/lib/xddp/"
 install -m 0755 gate/target/release/xddp-gate "$dest/usr/local/bin/xddp-gate"
-install -m 0644 controller/core.py controller/ddosctl.py controller/history.py "$dest/usr/local/lib/xddp/controller/"
+install -m 0644 controller/core.py controller/ddosctl.py controller/history.py controller/policy.py "$dest/usr/local/lib/xddp/controller/"
 install -m 0755 scripts/ddosctl "$dest/usr/local/sbin/ddosctl"
 install -m 0755 scripts/preflight.sh "$dest/usr/local/libexec/xddp-preflight"
 install -m 0755 scripts/deployment_check.py "$dest/usr/local/libexec/xddp-deployment-check"

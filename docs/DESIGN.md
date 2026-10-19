@@ -12,6 +12,19 @@ using source-based admission. Inventory listeners and firewall rules before
 configuring unused-port drops. Tailscale, Docker, DHCP, routing and ICMP/PMTU
 must remain functional. No fixed Ethernet MTU is assumed.
 
+## Controller responsibilities
+
+`core.Adaptive` owns automatic mode transitions, recovery probes, and emergency
+deadlines. Its sampling path evaluates threshold targets, then handles immediate
+escalation, recovery probes, ordinary escalation, or hysteretic relaxation.
+`policy.loader_policy` serializes static port/prefix policy without filesystem
+or map access. `ddosctl.Controller` coordinates I/O: collect independent telemetry,
+sample the policy, publish Gate state, renew the kernel lease, then write optional
+history and Prometheus output. Those last two steps cannot precede successful
+policy renewal. Collection helpers preserve unavailable readings and reset rate
+baselines instead of substituting zero traffic. Config format, CLI responses,
+metric names, and XDP ABI are unchanged by this separation.
+
 ## Threat model
 
 Upstream absorbs volumetric saturation. An attacker can spoof network packets,

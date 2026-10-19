@@ -33,6 +33,8 @@ jobs:
           test -x "$stage/usr/local/libexec/xddp-loader"
           test -x "$stage/usr/local/libexec/xddp-prepare-bpffs"
           test -f "$stage/usr/local/lib/xddp/controller/history.py"
+          test -f "$stage/usr/local/lib/xddp/controller/policy.py"
+          python3 "$stage/usr/local/lib/xddp/controller/ddosctl.py" --config "$stage/etc/xddp/controller.json" --check
           test -f "$stage/etc/systemd/system/xddp-bpffs.service"
           grep -q "StartLimitBurst=5" "$stage/etc/systemd/system/xddp-controller.service"
           grep -q "StateDirectory=xddp" "$stage/etc/systemd/system/xddp-controller.service"

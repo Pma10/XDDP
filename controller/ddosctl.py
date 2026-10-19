@@ -18,6 +18,7 @@ import urllib.request
 
 from core import Adaptive, MODES, rates, validate, bounded_json, runtime_document, host_pressure, host_network_counters
 from history import DEFAULT_PATH, History, read_day
+from policy import loader_policy
 
 
 def atomic(path, data, mode=0o644):
@@ -67,33 +68,26 @@ class Controller:
     def lease(self, seconds=None):
         c = self.cfg
         seconds = c["lease_seconds"] if seconds is None else seconds
-        budget = (self.adaptive.syn_budget(c["syn_per_cpu"])
-                  if c["manual_mode"] == "auto" else c["syn_per_cpu"][MODES[self.mode]])
+        budget = self._syn_budget()
         self.loader("config", c["pin_dir"], time.monotonic_ns() + int(seconds * 1e9) if seconds else 0,
                     int(c["observe"]), self.mode, int(c["ipv6"]), int(c["drop_tcp_fragments"]),
                     budget["rate"], budget["burst"], 2)
+
+    def _syn_budget(self):
+        if self.cfg["manual_mode"] == "auto":
+            return self.adaptive.syn_budget(self.cfg["syn_per_cpu"])
+        return self.cfg["syn_per_cpu"][MODES[self.mode]]
+
+    def _recovery_stage(self):
+        return self.adaptive.recovery_stage() if self.cfg["manual_mode"] == "auto" else 0
 
     def prepare(self):
         pin = Path(self.cfg["pin_dir"])
         if not (pin / "program").exists():
             pin.mkdir(parents=True, exist_ok=True)
             self.loader("load", self.cfg["object"], pin)
-        self.loader("validate",pin)
-        # Validate the entire bounded policy before entering reconciliation.
-        policies = {}
-        for key, flag in (("protected_tcp_ports",1),("drop_tcp_ports",2),("drop_udp_ports",4)):
-            for port in self.cfg[key]:
-                policies[port] = policies.get(port,0) | flag
-        lines = [f"port {port} {flags}" for port, flags in sorted(policies.items())]
-        blocks = {prefix: 5 for prefix in self.cfg["bogon_prefixes"]}
-        blocks.update({prefix: 11 for prefix in self.cfg["block_prefixes"]})
-        for mapname, prefixes in (("owned", dict.fromkeys(self.cfg["owned_prefixes"], 1)),
-                                  ("allow", dict.fromkeys(self.cfg["allow_prefixes"], 1)),
-                                  ("block", blocks)):
-            lines.extend(f"{mapname} {prefix} {reason}" for prefix, reason in sorted(prefixes.items()))
-        policy = "\n".join(lines) + "\n"
-        if len(policy.encode("ascii")) > 4 * 1024 * 1024:
-            raise ValueError("loader policy exceeds 4 MiB")
+        self.loader("validate", pin)
+        policy = loader_policy(self.cfg)
         # One subprocess replaces thousands of fork/exec calls. Lease expiry
         # still deliberately covers this non-transactional map reconciliation.
         self.lease(0)
@@ -113,23 +107,19 @@ class Controller:
                 counters[name.removeprefix("xddp_gate_")] = int(value) if value.isdecimal() else float(value)
         return counters
 
-    def tick(self):
-        now = time.monotonic()
+    def _xdp_counters(self):
         try:
-            current = self.loader("stats",self.cfg["pin_dir"])
+            current = self.loader("stats", self.cfg["pin_dir"])
             if not isinstance(current, dict) or not isinstance(current.get("candidate_reasons"), dict):
                 raise ValueError("invalid XDP statistics")
-            xdp_available = True
+            return current, True
         except (OSError, ValueError, subprocess.SubprocessError):
             # A missing sample is not zero traffic. Drop its rate baseline so
             # a later successful sample cannot masquerade as a one-tick spike.
-            current = {}
-            xdp_available = False
             self.telemetry_errors += 1
-        current.update(host_pressure())
-        current.update(host_network_counters())
-        self.snapshot = copy.deepcopy(current)
-        self.snapshot["stats_available"] = xdp_available
+            return {}, False
+
+    def _attachment(self):
         # Status is a read-only netlink query. Unknown attachment is not zero
         # traffic, and failure here must not prevent normal lease publication.
         try:
@@ -137,30 +127,50 @@ class Controller:
             program_id = attached.get("program_id")
             if type(program_id) is not int or program_id < 0:
                 raise ValueError("invalid attachment status")
-            self.snapshot["attached"] = int(program_id > 0)
-            self.snapshot["program_id"] = program_id
+            return {"attached": int(program_id > 0), "program_id": program_id}
         except (OSError, ValueError, subprocess.SubprocessError, AttributeError):
-            self.snapshot["attached"] = -1
-            self.snapshot["program_id"] = -1
-        self.snapshot["owned_destination_count"] = len(self.cfg["owned_prefixes"])
+            return {"attached": -1, "program_id": -1}
+
+    def _gate_sample(self):
         try:
-            gate = self.gate_counters()
-            current.update(gate)
-            self.snapshot["gate_counters"] = gate
-            self.snapshot["gate_metrics_available"] = True
-            self.snapshot["gate_runtime_generation"] = current.get("runtime_generation",0)
-            self.snapshot["gate_runtime_rejected_reads"] = current.get("runtime_rejected_reads",0)
-            self.snapshot["gate_runtime_missing_reads"] = current.get("runtime_missing_reads",0)
+            return self.gate_counters(), True
         except (OSError, ValueError, http.client.HTTPException):
-            self.snapshot["gate_metrics_available"] = False
             self.telemetry_errors += 1
-        self.signals = rates(self.previous,current,now-self.previous_time)
+            return {}, False
+
+    def _collect_sample(self):
+        current, xdp_available = self._xdp_counters()
+        current.update(host_pressure())
+        current.update(host_network_counters())
+        snapshot = copy.deepcopy(current)
+        snapshot["stats_available"] = xdp_available
+        snapshot.update(self._attachment())
+        snapshot["owned_destination_count"] = len(self.cfg["owned_prefixes"])
+
+        gate, gate_available = self._gate_sample()
+        snapshot["gate_metrics_available"] = gate_available
+        if gate_available:
+            current.update(gate)
+            snapshot["gate_counters"] = gate
+            snapshot["gate_runtime_generation"] = current.get("runtime_generation", 0)
+            snapshot["gate_runtime_rejected_reads"] = current.get("runtime_rejected_reads", 0)
+            snapshot["gate_runtime_missing_reads"] = current.get("runtime_missing_reads", 0)
+        return current, snapshot
+
+    def tick(self):
+        now = time.monotonic()
+        current, self.snapshot = self._collect_sample()
+        self.signals = rates(self.previous, current, now - self.previous_time)
         self.previous, self.previous_time = current, now
         mode = self.adaptive.sample(self.signals,now)
         self.mode = mode if self.cfg["manual_mode"] == "auto" else MODES.index(self.cfg["manual_mode"])
         self.publish()
         self.lease()
-        # Archive only one aggregate snapshot per minute, after renewing the safety lease.
+        # Optional persistence must follow both safety-critical policy writes.
+        self._record_history(current)
+        self._write_metrics()
+
+    def _record_history(self, current):
         try:
             self.history.record(int(time.time()), MODES[self.mode], self.cfg["observe"],
                                 current, self.signals, self.snapshot["gate_metrics_available"])
@@ -168,6 +178,8 @@ class Controller:
             self.history_errors += 1
             if self.history_errors <= 3:
                 print(f"XDDP history write failed: {exc}", file=sys.stderr)
+
+    def _metrics_document(self):
         text = []
         for key, value in self.snapshot.items():
             if type(value) in (int,float):
@@ -177,16 +189,20 @@ class Controller:
         for name,value in self.signals.items():
             text.append(f"xddp_observed_{name} {value}")
         text.extend([f"xddp_controller_history_write_errors {self.history_errors}",
-                     f"xddp_controller_xdp_stats_available {int(xdp_available)}",
+                     f"xddp_controller_xdp_stats_available {int(self.snapshot['stats_available'])}",
                      f"xddp_controller_telemetry_errors {self.telemetry_errors}",
                      f"xddp_controller_metrics_write_errors {self.metrics_errors}",
                      f"xddp_controller_emergency_timeouts {self.adaptive.emergency_timeouts}",
                      f"xddp_controller_mode {self.mode}",
-                     f"xddp_controller_recovery_stage {self.adaptive.recovery_stage() if self.cfg['manual_mode'] == 'auto' else 0}",
+                     f"xddp_controller_recovery_stage {self._recovery_stage()}",
                      f"xddp_controller_observe {int(self.cfg['observe'])}",
                      f"xddp_controller_last_update_unix {int(time.time())}"])
+        return "\n".join(text) + "\n"
+
+    def _write_metrics(self):
+        document = self._metrics_document()
         try:
-            atomic(self.cfg["metrics_file"],"\n".join(text)+"\n")
+            atomic(self.cfg["metrics_file"], document)
         except OSError as exc:
             self.metrics_errors += 1
             if self.metrics_errors <= 3:
@@ -201,9 +217,8 @@ class Controller:
     def command(self, args):
         if args == ["status"]:
             return dict(mode=MODES[self.mode],observe=self.cfg["observe"],signals=self.signals,
-                        configured_syn_per_cpu=(self.adaptive.syn_budget(self.cfg["syn_per_cpu"])
-                            if self.cfg["manual_mode"] == "auto" else self.cfg["syn_per_cpu"][MODES[self.mode]]),
-                        recovery_stage=(self.adaptive.recovery_stage() if self.cfg["manual_mode"] == "auto" else 0),
+                        configured_syn_per_cpu=self._syn_budget(),
+                        recovery_stage=self._recovery_stage(),
                         emergency_timeouts=self.adaptive.emergency_timeouts,
                         telemetry_errors=self.telemetry_errors,
                         metrics_write_errors=self.metrics_errors,
