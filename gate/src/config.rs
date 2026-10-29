@@ -18,6 +18,34 @@ impl Rate {
 
 #[cfg(test)] mod tests {
     use super::*;
+    #[test]
+    fn inbound_proxy_v2_is_opt_in_and_requires_explicit_cidrs() {
+        let raw: serde_json::Value = serde_json::from_str(
+            include_str!("../../config/gate.json")).unwrap();
+        let mut cfg: Config = serde_json::from_value(raw).unwrap();
+        assert!(!cfg.incoming_proxy_v2.enabled);
+        assert!(cfg.validate().is_ok());
+
+        cfg.incoming_proxy_v2.enabled = true;
+        assert!(cfg.validate().is_err()); // Fail closed when no source can be trusted.
+        cfg.incoming_proxy_v2.trusted_proxies.push(
+            "198.51.100.0/24".parse().unwrap());
+        assert!(cfg.validate().is_ok());
+
+        cfg.incoming_proxy_v2.trusted_proxies = vec![
+            "0.0.0.0/0".parse().unwrap()];
+        assert!(cfg.validate().is_err()); // Never silently allow every source.
+
+        cfg.incoming_proxy_v2.trusted_proxies = vec![
+            "2001:db8::/32".parse().unwrap()];
+        assert!(cfg.validate().is_err()); // IPv6 peer trust needs ipv6=true.
+        cfg.ipv6 = true;
+        assert!(cfg.validate().is_ok());
+
+        cfg.incoming_proxy_v2.trusted_proxies = vec![
+            "198.51.100.0/24".parse().unwrap(); 513];
+        assert!(cfg.validate().is_err());
+    }
     #[test] fn protocol_range_defaults_and_invalid_bounds() {
         let mut raw:serde_json::Value=serde_json::from_str(include_str!("../../config/gate.json")).unwrap();
         for key in ["min_protocol","max_protocol","future_login_schema"] {
