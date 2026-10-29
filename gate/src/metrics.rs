@@ -18,6 +18,10 @@ pub const NAMES: &[&str] = &[
     "relay_stall_timeouts", "half_close_timeouts", "backend_protection_rejected", "backend_circuit_opened",
     "client_idle_timeouts", "backend_dial_rate_limited",
     "runtime_missing_reads",
+    "proxy_v2_ingress_accepted",
+    "proxy_v2_ingress_untrusted",
+    "proxy_v2_ingress_invalid",
+    "proxy_v2_ingress_timeout",
 ];
 pub struct Metrics { values: Vec<AtomicU64> }
 impl Metrics {
