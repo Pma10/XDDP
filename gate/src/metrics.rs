@@ -23,6 +23,24 @@ pub const NAMES: &[&str] = &[
     "proxy_v2_ingress_invalid",
     "proxy_v2_ingress_timeout",
 ];
+// Keep appended counters at stable indexes: existing controller dashboards rely
+// on metric names, and unrelated call sites use fixed legacy metric indexes.
+pub const PROXY_V2_ACCEPTED: usize = 52;
+pub const PROXY_V2_UNTRUSTED: usize = 53;
+pub const PROXY_V2_INVALID: usize = 54;
+pub const PROXY_V2_TIMEOUT: usize = 55;
+
+#[cfg(test)]
+mod proxy_metric_tests {
+    use super::*;
+    #[test]
+    fn ingress_metric_indexes_match_published_names() {
+        assert_eq!(NAMES[PROXY_V2_ACCEPTED], "proxy_v2_ingress_accepted");
+        assert_eq!(NAMES[PROXY_V2_UNTRUSTED], "proxy_v2_ingress_untrusted");
+        assert_eq!(NAMES[PROXY_V2_INVALID], "proxy_v2_ingress_invalid");
+        assert_eq!(NAMES[PROXY_V2_TIMEOUT], "proxy_v2_ingress_timeout");
+    }
+}
 pub struct Metrics { values: Vec<AtomicU64> }
 impl Metrics {
     pub fn new() -> Self { Self { values: NAMES.iter().map(|_| AtomicU64::new(0)).collect() } }
