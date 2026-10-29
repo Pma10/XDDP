@@ -80,7 +80,7 @@ async def run(binary):
                     assert await asyncio.wait_for(reader.read(), 2) == b""
                 except ConnectionResetError:
                     pass  # Kernel may reset a rejected TCP socket with unread bytes.
-                writer.close(); await writer.wait_closed()
+                writer.close()  # rejected socket may be reset; no graceful close to await
                 # Bare Minecraft (no PROXY header) must never pass.
                 reader,writer = await asyncio.open_connection("127.0.0.1",listen)
                 writer.write(handshake() + LOGIN)
@@ -89,7 +89,7 @@ async def run(binary):
                     assert await asyncio.wait_for(reader.read(), 2) == b""
                 except ConnectionResetError:
                     pass  # Kernel may reset a rejected TCP socket with unread bytes.
-                writer.close(); await writer.wait_closed()
+                writer.close()  # rejected socket may be reset; no graceful close to await
                 assert len(seen) == 2, "rejected clients must not reach backend"
                 print("PASS: trusted incoming PROXY v2, source-based limiter, Leaf forwarding, direct rejection")
             finally:
