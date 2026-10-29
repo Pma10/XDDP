@@ -68,8 +68,58 @@ sudo ss -lntp | grep -E '25565|25566'
 sudo ddosctl status
 ```
 
+## Diagnosing connections without packet dumps
+
+The gate exports counters on its configured, loopback-only metrics address
+(default `127.0.0.1:9109`):
+
+```sh
+curl -fsS http://127.0.0.1:9109/metrics | grep proxy_v2_ingress
+```
+
+- `proxy_v2_ingress_accepted`: valid v2 header from a trusted peer;
+  the Gate accepted the asserted original player address for further policy.
+- `proxy_v2_ingress_untrusted`: the TCP peer was not in trusted CIDRs.
+  Check the **source IP as seen by the origin**, not the TCPShield player-facing IP.
+- `proxy_v2_ingress_invalid`: wrong/malformed header, or unexpected
+  connection closure during parsing; check that TCPShield has **v2** enabled,
+  not plain Minecraft traffic or v1 PROXY.
+- `proxy_v2_ingress_timeout`: the proxy did not deliver the complete
+  bounded header in time.
+
+An increasing `accepted` counter does **not** guarantee Leaf login:
+the backend may still reject its own outgoing PROXY header, wrong Minecraft
+protocol, or an unrelated login policy. Check Leaf logs and
+`config/paper-global.yml` `proxies.proxy-protocol: true` for a direct Paper
+backend. Gate startup's `observation=true` can reflect the initial runtime
+policy before the controller publishes its state; don't confuse it with
+PROXY v2 receive mode.
+
+## Installer and rollback
+
+Run the script only in a maintenance window and only after the backend
+is configured to accept an incoming PROXY header:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Pma10/XDDP/feature/trusted-inbound-proxy-v2-20261029/scripts/install-incoming-proxy-v2.sh -o /tmp/xddp-install-proxy-v2.sh
+sudo env LEAF_PROXY_READY=YES sh /tmp/xddp-install-proxy-v2.sh
+```
+
+The installer compiles/tests the branch, bootstraps Cargo when absent,
+**preserves an existing nonempty trusted CIDR list**, and backs up the Gate
+binary and configuration in `/root/xddp-proxy-backup.*`. On a failed
+deployment it attempts an atomic rollback and restarts only the Gate.
+It never edits `/etc/xddp/controller.json`, XDP maps, Leaf configuration,
+the firewall, or TCPShield's panel settings.
+
 If incompatible, restore the saved binary and gate.json and restart only
 `xddp-gate`. No need to detach XDP or restart the controller.
+
+**Security:** A test configuration containing both `0.0.0.0/1` and
+`128.0.0.0/1` trusts the entire IPv4 Internet. It is equivalent to
+disabling incoming source authentication, and allows arbitrary client-IP
+spoofing. It is not a substitute for the origin firewall. Restore actual
+TCPShield egress CIDRs before exposing a public listener.
 
 For NGINX Proxy Manager, ordinary NGINX `proxy_protocol on` sends **v1**
 unless specifically configured otherwise; this patch is v2 only. Test the
