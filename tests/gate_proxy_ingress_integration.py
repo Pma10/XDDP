@@ -91,6 +91,9 @@ async def run(binary):
                     pass  # Kernel may reset a rejected TCP socket with unread bytes.
                 writer.close()  # rejected socket may be reset; no graceful close to await
                 assert len(seen) == 2, "rejected clients must not reach backend"
+                counters = await metrics(metric)
+                assert counters["proxy_v2_ingress_accepted"] >= 3
+                assert counters["proxy_v2_ingress_invalid"] >= 1
                 print("PASS: trusted incoming PROXY v2, source-based limiter, Leaf forwarding, direct rejection")
             finally:
                 for writer in writers:
