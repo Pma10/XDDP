@@ -4,7 +4,7 @@ set -eu
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 [ "$(id -u)" -eq 0 ] || die "Run as root"
-[ "\${LEAF_PROXY_READY:-}" = YES ] || die "First enable PROXY protocol on the Leaf/private backend, then set LEAF_PROXY_READY=YES"
+[ "${LEAF_PROXY_READY:-}" = YES ] || die "First enable PROXY protocol on the Leaf/private backend, then set LEAF_PROXY_READY=YES"
 command -v git >/dev/null 2>&1 || die "git is required"
 command -v python3 >/dev/null 2>&1 || die "python3 is required"
 command -v systemctl >/dev/null 2>&1 || die "systemctl is required"
