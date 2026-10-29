@@ -48,8 +48,11 @@ cleanup() {
     set +e
     if [ "$deploy_started" -eq 1 ] && [ "$deployed" -eq 0 ]; then
         echo "Installation failed; restoring previous Gate binary and config..." >&2
-        cp -p "$backup/xddp-gate" "$GATE_BIN"
-        cp -p "$backup/gate.json" "$GATE_CONFIG"
+        # Atomic restores avoid ETXTBSY when an old Gate executable is running.
+        cp -p "$backup/xddp-gate" "$GATE_BIN.restore"
+        cp -p "$backup/gate.json" "$GATE_CONFIG.restore"
+        mv -f "$GATE_BIN.restore" "$GATE_BIN"
+        mv -f "$GATE_CONFIG.restore" "$GATE_CONFIG"
         systemctl restart xddp-gate
     fi
     rm -rf "$work"
