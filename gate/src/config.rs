@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use ipnet::IpNet;
 use std::{collections::BTreeMap, net::SocketAddr, path::Path};
 
 #[derive(Clone, Copy, Debug, Deserialize, Default)]
@@ -17,6 +18,34 @@ impl Rate {
 
 #[cfg(test)] mod tests {
     use super::*;
+    #[test]
+    fn inbound_proxy_v2_is_opt_in_and_requires_explicit_cidrs() {
+        let raw: serde_json::Value = serde_json::from_str(
+            include_str!("../../config/gate.json")).unwrap();
+        let mut cfg: Config = serde_json::from_value(raw).unwrap();
+        assert!(!cfg.incoming_proxy_v2.enabled);
+        assert!(cfg.validate().is_ok());
+
+        cfg.incoming_proxy_v2.enabled = true;
+        assert!(cfg.validate().is_err()); // Fail closed when no source can be trusted.
+        cfg.incoming_proxy_v2.trusted_proxies.push(
+            "198.51.100.0/24".parse().unwrap());
+        assert!(cfg.validate().is_ok());
+
+        cfg.incoming_proxy_v2.trusted_proxies = vec![
+            "0.0.0.0/0".parse().unwrap()];
+        assert!(cfg.validate().is_err()); // Never silently allow every source.
+
+        cfg.incoming_proxy_v2.trusted_proxies = vec![
+            "2001:db8::/32".parse().unwrap()];
+        assert!(cfg.validate().is_err()); // IPv6 peer trust needs ipv6=true.
+        cfg.ipv6 = true;
+        assert!(cfg.validate().is_ok());
+
+        cfg.incoming_proxy_v2.trusted_proxies = vec![
+            "198.51.100.0/24".parse().unwrap(); 513];
+        assert!(cfg.validate().is_err());
+    }
     #[test] fn protocol_range_defaults_and_invalid_bounds() {
         let mut raw:serde_json::Value=serde_json::from_str(include_str!("../../config/gate.json")).unwrap();
         for key in ["min_protocol","max_protocol","future_login_schema"] {
@@ -188,6 +217,9 @@ pub struct Config {
     pub backend: SocketAddr,
     pub metrics: SocketAddr,
     pub proxy_v2: bool,
+    /// When enabled, require a PROXY v2 header from a trusted TCP peer.
+    #[serde(default)]
+    pub incoming_proxy_v2: IncomingProxyV2,
     pub allow_backend_identity_loss: bool,
     pub ipv6: bool,
     pub observe: bool,
@@ -202,6 +234,14 @@ pub struct Config {
     pub timeouts: Timeouts,
     pub protocol: Protocol,
     pub cache: Cache,
+}
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IncomingProxyV2 {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub trusted_proxies: Vec<IpNet>,
 }
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -253,6 +293,14 @@ impl Config {
         }
         if !self.ipv6 && (self.listen.is_ipv6() || self.backend.is_ipv6()) {
             return Err("IPv6 address requires ipv6=true".into());
+        }
+        if self.incoming_proxy_v2.enabled {
+            let trust = &self.incoming_proxy_v2.trusted_proxies;
+            if trust.is_empty() || trust.len() > 512 ||
+                trust.iter().any(|net| net.prefix_len() == 0 ||
+                    (net.addr().is_ipv6() && !self.ipv6)) {
+                return Err("incoming PROXY v2 requires 1..512 explicit trusted CIDRs (no /0); enable ipv6 for IPv6 peers".into());
+            }
         }
         if !self.proxy_v2 && !self.allow_backend_identity_loss {
             return Err("enable PROXY v2 on trusted backend or explicitly allow identity loss".into());

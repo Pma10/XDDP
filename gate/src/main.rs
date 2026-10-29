@@ -2,6 +2,7 @@ mod cache;
 mod backend;
 mod config;
 mod limiter;
+mod incoming_proxy;
 mod metrics;
 mod protocol;
 mod runtime;
@@ -9,7 +10,7 @@ mod relay;
 
 use config::Config;
 use limiter::{Event, Limiter, Ticket};
-use metrics::{Gauge, Metrics};
+use metrics::{Gauge, Metrics, PROXY_V2_ACCEPTED, PROXY_V2_UNTRUSTED, PROXY_V2_INVALID, PROXY_V2_TIMEOUT};
 use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 use tokio::{io::AsyncWriteExt, net::{TcpListener,TcpStream}, sync::{OwnedSemaphorePermit,Semaphore},
     task::JoinSet, time::{timeout,Instant}};
@@ -69,7 +70,16 @@ async fn run(cfg:Config) -> Result<(),Box<dyn std::error::Error>> {
             maintenance.metrics.set(51,missing);
             tokio::time::sleep(Duration::from_millis(100)).await; }
     });
-    eprintln!("xddp-gate ready on {}; observation={}",s.cfg.listen,s.runtime.policy(s.cfg.listen.ip()).0.observe);
+    eprintln!(
+        "xddp-gate ready on {}; observation={}; incoming_proxy_v2={}; outgoing_proxy_v2={}; trusted_proxy_cidrs={}",
+        s.cfg.listen, s.runtime.policy(s.cfg.listen.ip()).0.observe,
+        s.cfg.incoming_proxy_v2.enabled, s.cfg.proxy_v2,
+        s.cfg.incoming_proxy_v2.trusted_proxies.len(),
+    );
+    if s.cfg.incoming_proxy_v2.enabled &&
+       s.cfg.incoming_proxy_v2.trusted_proxies.iter().any(|n| n.prefix_len() <= 1) {
+        eprintln!("WARNING: PROXY v2 trusts most/all internet sources; source-IP spoofing is possible without an upstream firewall");
+    }
     let mut tasks = JoinSet::new();
     let shutdown = shutdown_signal(); tokio::pin!(shutdown);
     loop {
@@ -81,20 +91,23 @@ async fn run(cfg:Config) -> Result<(),Box<dyn std::error::Error>> {
                 let (client,peer) = match accepted { Ok(x)=>x, Err(_)=> {
                     s.metrics.inc(26); tokio::time::sleep(Duration::from_millis(100)).await; continue; } };
                 s.metrics.inc(0);
-                let (policy,blocked) = s.runtime.policy(peer.ip());
-                if blocked || (!policy.observe && policy.mode == 3) { continue; }
+                // Drop untrusted TCP peers before allocating a prelogin slot.
+                if s.cfg.incoming_proxy_v2.enabled &&
+                    !incoming_proxy::is_trusted(peer.ip(), &s.cfg.incoming_proxy_v2) {
+                    s.metrics.inc(PROXY_V2_UNTRUSTED);
+                    continue;
+                }
+                // Identity for trusted ingress must be parsed before IP/prefix admission.
                 let (Ok(socket),Ok(pre)) = (s.sockets.clone().try_acquire_owned(),s.prelogin.clone().try_acquire_owned()) else {
                     s.metrics.inc(20); continue;
                 };
-                // Charge shared connect capacity only after resource and identity checks.
-                let Some(ticket) = s.limiter.accept(peer.ip(),policy) else { continue; };
                 let state = s.clone();
                 let active = Gauge::new(s.metrics.clone(),1);
                 let admission = Admission { slot:pre,gauge:Gauge::new(s.metrics.clone(),2),
                     duration:PreloginTime { start:Instant::now(),metrics:s.metrics.clone() } };
                 tasks.spawn(async move {
                     let (_socket,_active) = (socket,active);
-                    if let Err(e) = handle(client,peer,state.clone(),ticket,admission).await {
+                    if let Err(e) = handle(client,peer,state.clone(),admission).await {
                         record_error(&state.metrics,e);
                     }
                 });
@@ -125,13 +138,37 @@ async fn phase(client:&mut TcpStream,s:&State,left:&mut usize,ms:u64,max:usize) 
     protocol::read_frame(client,s.cfg.protocol.max_frame.min(max),left,Instant::now()+Duration::from_millis(ms),
         Duration::from_millis(s.cfg.timeouts.progress_ms),Duration::from_millis(s.cfg.timeouts.progress_ms)).await
 }
-async fn handle(mut client:TcpStream,peer:SocketAddr,s:Arc<State>,mut ticket:Ticket,admission:Admission) -> Result<(),protocol::Error> {
+async fn handle(mut client:TcpStream,socket_peer:SocketAddr,s:Arc<State>,admission:Admission) -> Result<(),protocol::Error> {
     use protocol::Error;
     client.set_nodelay(true).map_err(|_|Error::Io)?;
+    // PROXY information is trusted only from configured socket peers. No IP policy
+    // or identity quotas are applied to the shared proxy IP.
+    let deadline = admission.duration.start + Duration::from_millis(s.cfg.timeouts.handshake_ms);
+    let (peer, forwarded_dst) = if s.cfg.incoming_proxy_v2.enabled {
+        let header_deadline = deadline.min(
+            admission.duration.start + Duration::from_millis(s.cfg.timeouts.first_progress_ms));
+        match incoming_proxy::read(&mut client, socket_peer, &s.cfg.incoming_proxy_v2,
+            header_deadline).await {
+            Ok(identity) => {
+                s.metrics.inc(PROXY_V2_ACCEPTED);
+                identity
+            }
+            Err(err) => {
+                s.metrics.inc(if matches!(err, Error::Deadline | Error::Slow) { PROXY_V2_TIMEOUT } else { PROXY_V2_INVALID });
+                return Err(err);
+            }
+        }
+    } else {
+        (socket_peer, client.local_addr().map_err(|_|Error::Io)?)
+    };
+    let (policy,blocked) = s.runtime.policy(peer.ip());
+    if blocked || (!policy.observe && policy.mode == 3) { return Ok(()); }
+    // Charge shared connect capacity only after resource and identity checks.
+    let Some(mut ticket) = s.limiter.accept(peer.ip(),policy) else { return Ok(()); };
     let mut left = s.cfg.protocol.max_initial_bytes;
     // Start the absolute handshake deadline at accept, not when a task gets CPU.
     let handshake = protocol::read_frame(&mut client,protocol::handshake_max(&s.cfg.protocol),&mut left,
-        admission.duration.start+Duration::from_millis(s.cfg.timeouts.handshake_ms),
+        deadline,
         Duration::from_millis(s.cfg.timeouts.progress_ms),Duration::from_millis(s.cfg.timeouts.first_progress_ms)).await?;
     let h = protocol::handshake(handshake.body(),&s.cfg.protocol)?;
     ticket.handshake = true; s.metrics.inc(4);
@@ -193,7 +230,7 @@ async fn handle(mut client:TcpStream,peer:SocketAddr,s:Arc<State>,mut ticket:Tic
     let backend = timeout(Duration::from_millis(s.cfg.timeouts.backend_ms),async {
         let mut backend = TcpStream::connect(s.cfg.backend).await?;
         backend.set_nodelay(true)?;
-        if s.cfg.proxy_v2 { backend.write_all(&cache::proxy_header(peer,client.local_addr()?)?).await?; }
+        if s.cfg.proxy_v2 { backend.write_all(&cache::proxy_header(peer,forwarded_dst)?).await?; }
         backend.write_all(&handshake.wire).await?; backend.write_all(&login.wire).await?;
         Ok::<_,std::io::Error>(backend)
     }).await;
