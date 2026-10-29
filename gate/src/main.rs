@@ -10,7 +10,7 @@ mod relay;
 
 use config::Config;
 use limiter::{Event, Limiter, Ticket};
-use metrics::{Gauge, Metrics};
+use metrics::{Gauge, Metrics, PROXY_V2_ACCEPTED, PROXY_V2_UNTRUSTED, PROXY_V2_INVALID, PROXY_V2_TIMEOUT};
 use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 use tokio::{io::AsyncWriteExt, net::{TcpListener,TcpStream}, sync::{OwnedSemaphorePermit,Semaphore},
     task::JoinSet, time::{timeout,Instant}};
@@ -94,7 +94,7 @@ async fn run(cfg:Config) -> Result<(),Box<dyn std::error::Error>> {
                 // Drop untrusted TCP peers before allocating a prelogin slot.
                 if s.cfg.incoming_proxy_v2.enabled &&
                     !incoming_proxy::is_trusted(peer.ip(), &s.cfg.incoming_proxy_v2) {
-                    s.metrics.inc(53);
+                    s.metrics.inc(PROXY_V2_UNTRUSTED);
                     continue;
                 }
                 // Identity for trusted ingress must be parsed before IP/prefix admission.
@@ -150,11 +150,11 @@ async fn handle(mut client:TcpStream,socket_peer:SocketAddr,s:Arc<State>,admissi
         match incoming_proxy::read(&mut client, socket_peer, &s.cfg.incoming_proxy_v2,
             header_deadline).await {
             Ok(identity) => {
-                s.metrics.inc(52);
+                s.metrics.inc(PROXY_V2_ACCEPTED);
                 identity
             }
             Err(err) => {
-                s.metrics.inc(if matches!(err, Error::Deadline | Error::Slow) { 55 } else { 54 });
+                s.metrics.inc(if matches!(err, Error::Deadline | Error::Slow) { PROXY_V2_TIMEOUT } else { PROXY_V2_INVALID });
                 return Err(err);
             }
         }
