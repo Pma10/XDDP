@@ -7,11 +7,18 @@ use tokio::{io::{AsyncRead, AsyncReadExt}, time::{timeout_at, Instant}};
 const SIGNATURE: &[u8; 12] = b"\r\n\r\n\0\r\nQUIT\n";
 const MAX_ADDRESS_AND_TLVS: usize = 4096;
 
+/// Verify the immediate TCP peer, never an address asserted by a PROXY header.
+/// Normalize IPv4-mapped IPv6 peers to avoid rejecting valid dual-stack sockets.
+pub fn is_trusted(peer: IpAddr, cfg: &IncomingProxyV2) -> bool {
+    let normalized = crate::limiter::normalize(peer);
+    cfg.trusted_proxies.iter().any(|net| net.contains(&normalized))
+}
+
 pub async fn read<R: AsyncRead + Unpin>(
     stream: &mut R, socket_peer: SocketAddr, cfg: &IncomingProxyV2, deadline: Instant,
 ) -> Result<(SocketAddr, SocketAddr), Error> {
     // Reject untrusted peers before accepting any client-provided identity bytes.
-    if !cfg.trusted_proxies.iter().any(|net| net.contains(&socket_peer.ip())) {
+    if !is_trusted(socket_peer.ip(), cfg) {
         return Err(Error::Invalid);
     }
     let mut header = [0u8; 16];
@@ -26,7 +33,10 @@ pub async fn read<R: AsyncRead + Unpin>(
         _ => return Err(Error::Invalid), // reject UDP/UNSPEC/unknown families
     };
     let len = u16::from_be_bytes([header[14], header[15]]) as usize;
-    if len < min || len > MAX_ADDRESS_AND_TLVS {
+    if len < min {
+        return Err(Error::Invalid);
+    }
+    if len > MAX_ADDRESS_AND_TLVS {
         return Err(Error::Oversized);
     }
     let mut body = vec![0u8; len];
@@ -105,5 +115,29 @@ mod tests {
         assert_eq!(parse(&truncated,"192.0.2.5:456").await,Err(Error::Io));
         let mut sig = frame; sig[0] = b'!';
         assert_eq!(parse(&sig,"192.0.2.5:456").await,Err(Error::Invalid));
+        let mut short = header(src, dst);
+        short[14..16].copy_from_slice(&11u16.to_be_bytes());
+        assert_eq!(parse(&short,"192.0.2.5:456").await,Err(Error::Invalid));
+        let mut wrong_version = header(src, dst);
+        wrong_version[12] = 0x11;
+        assert_eq!(parse(&wrong_version,"192.0.2.5:456").await,Err(Error::Invalid));
+    }
+    #[test]
+    fn mapped_ipv4_peers_use_ipv4_cidr_trust() {
+        let config = cfg();
+        assert!(is_trusted("::ffff:192.0.2.7".parse().unwrap(), &config));
+        assert!(!is_trusted("::ffff:198.51.100.7".parse().unwrap(), &config));
+    }
+    #[tokio::test]
+    async fn bounded_header_timeout() {
+        let (mut tx, mut rx) = duplex(8192);
+        tx.write_all(SIGNATURE).await.unwrap();
+        let result = read(
+            &mut rx,
+            "192.0.2.5:12345".parse().unwrap(),
+            &cfg(),
+            Instant::now() + std::time::Duration::from_millis(25),
+        ).await;
+        assert_eq!(result, Err(Error::Deadline));
     }
 }
