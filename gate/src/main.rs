@@ -70,7 +70,16 @@ async fn run(cfg:Config) -> Result<(),Box<dyn std::error::Error>> {
             maintenance.metrics.set(51,missing);
             tokio::time::sleep(Duration::from_millis(100)).await; }
     });
-    eprintln!("xddp-gate ready on {}; observation={}",s.cfg.listen,s.runtime.policy(s.cfg.listen.ip()).0.observe);
+    eprintln!(
+        "xddp-gate ready on {}; observation={}; incoming_proxy_v2={}; outgoing_proxy_v2={}; trusted_proxy_cidrs={}",
+        s.cfg.listen, s.runtime.policy(s.cfg.listen.ip()).0.observe,
+        s.cfg.incoming_proxy_v2.enabled, s.cfg.proxy_v2,
+        s.cfg.incoming_proxy_v2.trusted_proxies.len(),
+    );
+    if s.cfg.incoming_proxy_v2.enabled &&
+       s.cfg.incoming_proxy_v2.trusted_proxies.iter().any(|n| n.prefix_len() <= 1) {
+        eprintln!("WARNING: PROXY v2 trusts most/all internet sources; source-IP spoofing is possible without an upstream firewall");
+    }
     let mut tasks = JoinSet::new();
     let shutdown = shutdown_signal(); tokio::pin!(shutdown);
     loop {
@@ -82,6 +91,12 @@ async fn run(cfg:Config) -> Result<(),Box<dyn std::error::Error>> {
                 let (client,peer) = match accepted { Ok(x)=>x, Err(_)=> {
                     s.metrics.inc(26); tokio::time::sleep(Duration::from_millis(100)).await; continue; } };
                 s.metrics.inc(0);
+                // Drop untrusted TCP peers before allocating a prelogin slot.
+                if s.cfg.incoming_proxy_v2.enabled &&
+                    !incoming_proxy::is_trusted(peer.ip(), &s.cfg.incoming_proxy_v2) {
+                    s.metrics.inc(53);
+                    continue;
+                }
                 // Identity for trusted ingress must be parsed before IP/prefix admission.
                 let (Ok(socket),Ok(pre)) = (s.sockets.clone().try_acquire_owned(),s.prelogin.clone().try_acquire_owned()) else {
                     s.metrics.inc(20); continue;
@@ -130,8 +145,19 @@ async fn handle(mut client:TcpStream,socket_peer:SocketAddr,s:Arc<State>,admissi
     // or identity quotas are applied to the shared proxy IP.
     let deadline = admission.duration.start + Duration::from_millis(s.cfg.timeouts.handshake_ms);
     let (peer, forwarded_dst) = if s.cfg.incoming_proxy_v2.enabled {
-        incoming_proxy::read(&mut client, socket_peer, &s.cfg.incoming_proxy_v2,
-            deadline.min(admission.duration.start + Duration::from_millis(s.cfg.timeouts.first_progress_ms))).await?
+        let header_deadline = deadline.min(
+            admission.duration.start + Duration::from_millis(s.cfg.timeouts.first_progress_ms));
+        match incoming_proxy::read(&mut client, socket_peer, &s.cfg.incoming_proxy_v2,
+            header_deadline).await {
+            Ok(identity) => {
+                s.metrics.inc(52);
+                identity
+            }
+            Err(err) => {
+                s.metrics.inc(if matches!(err, Error::Deadline | Error::Slow) { 55 } else { 54 });
+                return Err(err);
+            }
+        }
     } else {
         (socket_peer, client.local_addr().map_err(|_|Error::Io)?)
     };
